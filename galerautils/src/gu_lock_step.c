@@ -23,8 +23,8 @@
 void
 gu_lock_step_init (gu_lock_step_t* ls)
 {
-    gu_mutex_init (&ls->mtx, NULL);
-    gu_cond_init  (&ls->cond, NULL);
+    gu_mutex_init (NULL, &ls->mtx);
+    gu_cond_init  (NULL, &ls->cond);
     ls->wait    = 0;
     ls->cont    = 0;
     ls->enabled = false;

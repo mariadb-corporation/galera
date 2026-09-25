@@ -24,7 +24,7 @@ START_TEST (gcs_sm_test_basic)
     ck_assert(sm != NULL);
 
     gu_cond_t cond;
-    gu_cond_init (&cond, NULL);
+    gu_cond_init (NULL, &cond);
 
     int i;
     for (i = 1; i < 5; i++) {
@@ -55,7 +55,7 @@ static void* simple_thread(void* arg)
     gcs_sm_t* sm = (gcs_sm_t*) arg;
 
     gu_cond_t cond;
-    gu_cond_init (&cond, NULL);
+    gu_cond_init (NULL, &cond);
 
     if (0 == (simple_ret = gcs_sm_enter (sm, &cond, false, true))) {
         usleep(1000);
@@ -75,7 +75,7 @@ START_TEST (gcs_sm_test_simple)
     ck_assert(sm != NULL);
 
     gu_cond_t cond;
-    gu_cond_init (&cond, NULL);
+    gu_cond_init (NULL, &cond);
 
     ret = gcs_sm_enter(sm, &cond, false, true);
     ck_assert_msg(0 == ret, "gcs_sm_enter() failed: %d (%s)",
@@ -86,15 +86,15 @@ START_TEST (gcs_sm_test_simple)
 
     gu_thread_t t1, t2, t3, t4;
 
-    gu_thread_create (&t1, NULL, simple_thread, sm);
-    gu_thread_create (&t2, NULL, simple_thread, sm);
-    gu_thread_create (&t3, NULL, simple_thread, sm);
+    gu_thread_create (NULL, &t1, simple_thread, sm);
+    gu_thread_create (NULL, &t2, simple_thread, sm);
+    gu_thread_create (NULL, &t3, simple_thread, sm);
 
     WAIT_FOR ((long)sm->wait_q_len == sm->users);
     ck_assert_msg((long)sm->wait_q_len == sm->users,
                   "wait_q_len = %lu, users = %ld", sm->wait_q_len, sm->users);
 
-    gu_thread_create (&t4, NULL, simple_thread, sm);
+    gu_thread_create (NULL, &t4, simple_thread, sm);
 
     mark_point();
     gu_thread_join (t4, NULL); // there's no space in the queue
@@ -151,7 +151,7 @@ START_TEST (gcs_sm_test_close)
     ck_assert(sm != NULL);
 
     gu_cond_t cond;
-    gu_cond_init (&cond, NULL);
+    gu_cond_init (NULL, &cond);
 
     int ret = gcs_sm_enter(sm, &cond, false, true);
     ck_assert_msg(0 == ret, "gcs_sm_enter() failed: %d (%s)",
@@ -165,7 +165,7 @@ START_TEST (gcs_sm_test_close)
                   sm->wait_q_tail);
 
     gu_thread_t thr;
-    gu_thread_create (&thr, NULL, closing_thread, sm);
+    gu_thread_create (NULL, &thr, closing_thread, sm);
     WAIT_FOR(1 == order);
     ck_assert_msg(order == 1, "order is %d, expected 1", order);
     usleep(TEST_USLEEP); // make sure closing_thread() blocks in gcs_sm_close()
@@ -197,7 +197,7 @@ static void* pausing_thread (void* data)
     gcs_sm_t* sm = (gcs_sm_t*)data;
 
     gu_cond_t cond;
-    gu_cond_init (&cond, NULL);
+    gu_cond_init (NULL, &cond);
 
     gcs_sm_schedule (sm);
     gu_info ("pausing_thread scheduled, pause_order = %d", pause_order);
@@ -237,7 +237,7 @@ START_TEST (gcs_sm_test_pause)
                   sm->wait_q_head);
 
     gu_cond_t cond;
-    gu_cond_init (&cond, NULL);
+    gu_cond_init (NULL, &cond);
 
     gu_thread_t thr;
 
@@ -256,7 +256,7 @@ START_TEST (gcs_sm_test_pause)
     // Test attempt to enter paused monitor
     pause_order = 0;
     gcs_sm_pause (sm);
-    gu_thread_create (&thr, NULL, pausing_thread, sm);
+    gu_thread_create (NULL, &thr, pausing_thread, sm);
     WAIT_FOR(1 == pause_order);
     ck_assert_msg(pause_order == 1, "pause_order = %d, expected 1",
                   pause_order);
@@ -296,7 +296,7 @@ START_TEST (gcs_sm_test_pause)
     gcs_sm_schedule (sm);
     ck_assert_msg(2 == sm->wait_q_tail, "wait_q_tail = %lu, expected 2",
                   sm->wait_q_tail);
-    gu_thread_create (&thr, NULL, pausing_thread, sm);
+    gu_thread_create (NULL, &thr, pausing_thread, sm);
     usleep (TEST_USLEEP);
     // no changes in pause_order
     ck_assert_msg(pause_order == 3, "pause_order = %d, expected 3",pause_order);
@@ -408,13 +408,13 @@ static void* interrupt_thread(void* arg)
     global_handle = gcs_sm_schedule (sm);
 
     if (global_handle >= 0) {
-        pthread_cond_t cond;
-        pthread_cond_init (&cond, NULL);
+        gu_cond_t cond;
+        gu_cond_init (NULL, &cond);
 
         if (0 == (global_ret = gcs_sm_enter (sm, &cond, true, true))) {
             gcs_sm_leave (sm);
         }
-        pthread_cond_destroy (&cond);
+        gu_cond_destroy (&cond);
     }
 
     return NULL;
@@ -422,7 +422,7 @@ static void* interrupt_thread(void* arg)
 
 #define TEST_CREATE_THREAD(thr, tail, h, u)                             \
     global_handle = -1;                                                 \
-    gu_thread_create (thr, NULL, interrupt_thread, sm);                 \
+    gu_thread_create (NULL, thr, interrupt_thread, sm);            \
     WAIT_FOR(global_handle == h);                                       \
     ck_assert_msg(sm->wait_q_tail == tail, "wait_q_tail = %lu, expected %lu", \
                   sm->wait_q_tail, static_cast<unsigned long>(tail));   \
@@ -445,7 +445,7 @@ START_TEST (gcs_sm_test_interrupt)
     ck_assert(sm != NULL);
 
     gu_cond_t cond;
-    gu_cond_init (&cond, NULL);
+    gu_cond_init (NULL, &cond);
 
     gu_thread_t thr1;
     gu_thread_t thr2;
@@ -517,10 +517,10 @@ START_TEST (gcs_sm_test_interrupt)
 
     gu_info ("Calling gcs_sm_leave()");
     gcs_sm_leave (sm);
-    pthread_join (thr1, NULL);
+    gu_thread_join (thr1, NULL);
     ck_assert_msg(global_ret == 0, "global_ret = %ld, expected 0", global_ret);
 
-    pthread_cond_destroy (&cond);
+    gu_cond_destroy (&cond);
     gcs_sm_close (sm);
     gcs_sm_destroy (sm);
 }

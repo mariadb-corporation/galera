@@ -1,5 +1,5 @@
 //
-// Copyright (C) 2014-2024 Codership Oy <info@codership.com>
+// Copyright (C) 2014-2025 Codership Oy <info@codership.com>
 //
 
 
@@ -14,8 +14,10 @@
 #include "gu_uri.hpp"
 #include "gu_signals.hpp"
 
+#include "wsrep_tls_service.h"
 #include "wsrep_allowlist_service.h"
 #include "wsrep_node_isolation.h"
+#include "wsrep_connection_monitor_service.h"
 
 #include <netinet/tcp.h> // tcp_info
 
@@ -220,6 +222,8 @@ namespace gu
             : value_(value)
             , category_(&category)
             , error_extra_()
+            , wsrep_category_()
+            , tls_stream_()
         { }
 
         AsioErrorCode(int value, const AsioErrorCategory& category,
@@ -227,6 +231,17 @@ namespace gu
             : value_(value)
             , category_(&category)
             , error_extra_(error_extra)
+            , wsrep_category_()
+            , tls_stream_()
+        { }
+
+        AsioErrorCode(int value, const void* wsrep_category,
+                      const wsrep_tls_stream_t* tls_stream)
+            : value_(value)
+            , category_()
+            , error_extra_()
+            , wsrep_category_(wsrep_category)
+            , tls_stream_(tls_stream)
         { }
         /**
          * Return error number.
@@ -261,6 +276,8 @@ namespace gu
         const AsioErrorCategory* category_;
         // Extra category specific error information
         int error_extra_;
+        const void* wsrep_category_;
+        const wsrep_tls_stream_t* tls_stream_;
     };
 
     std::ostream& operator<<(std::ostream&, const AsioErrorCode&);
@@ -743,11 +760,17 @@ namespace gu
          */
         std::shared_ptr<AsioAcceptor> make_acceptor(const gu::URI& uri);
 
+        /**
+         * Return pointer to TLS service.
+         */
+        wsrep_tls_service_v1_t* tls_service() const { return tls_service_; }
+
         class Impl;
         Impl& impl();
     private:
         std::unique_ptr<Impl> impl_;
         const gu::Config& conf_;
+        wsrep_tls_service_v1_t* tls_service_;
         gu::Signals::signal_connection signal_connection_;
         bool dynamic_socket_;
     };
@@ -780,6 +803,10 @@ namespace gu
         std::unique_ptr<Impl> impl_;
     };
 
+    /* Init/deinit global TLS service hooks. */
+    int init_tls_service_v1(wsrep_tls_service_v1_t*);
+    void deinit_tls_service_v1();
+
     /* Allowlist check callback */
     bool allowlist_value_check(wsrep_allowlist_key_t key, const std::string& value);
 
@@ -790,6 +817,22 @@ namespace gu
     extern std::atomic<enum wsrep_node_isolation_mode>
         gu_asio_node_isolation_mode;
 
+    /* Init/deinit global connection monitoring service hooks */
+    int init_connection_monitor_service_v1(wsrep_connection_monitor_service_v1_t*);
+    void deinit_connection_monitor_service_v1();
+    /* Connection monitor connect callback */
+    void connection_monitor_connect(wsrep_connection_key_t id,
+                                    const std::string& scheme,
+                                    const std::string& local_addr,
+                                    const std::string& remote_addr);
+    /* Connection monitor disconnect callback */
+    void connection_monitor_disconnect(wsrep_connection_key_t id);
+    /* Connection monitor ssl info callback */
+    void connection_monitor_ssl_info(wsrep_connection_key_t id,
+                                     const std::string& cipher,
+                                     const std::string& issuer,
+                                     const std::string& subject,
+                                     const std::string& version);
 }
 
 #endif // GU_ASIO_HPP

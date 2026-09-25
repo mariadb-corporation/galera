@@ -13,6 +13,7 @@
  */
 
 #include <galerautils.h>
+#include <gu_thread_keys.hpp>
 
 #include "gcs_fifo_lite.hpp"
 
@@ -50,9 +51,12 @@ gcs_fifo_lite_t* gcs_fifo_lite_create (size_t length, size_t item_size)
 	ret->queue     = gu_malloc (ret->length * item_size);
 
 	if (ret->queue) {
-	    gu_mutex_init (&ret->lock,     NULL);
-	    gu_cond_init  (&ret->put_cond, NULL);
-	    gu_cond_init  (&ret->get_cond, NULL);
+	    gu_mutex_init (gu::get_mutex_key(gu::GU_MUTEX_KEY_GCS_FIFO_LITE),
+                           &ret->lock);
+	    gu_cond_init  (gu::get_cond_key(gu::GU_COND_KEY_GCS_FIFO_LITE_PUT),
+                           &ret->put_cond);
+	    gu_cond_init  (gu::get_cond_key(gu::GU_COND_KEY_GCS_FIFO_LITE_GET),
+                           &ret->get_cond);
 	    /* everything else must be initialized to 0 by calloc */
 	}
 	else {

@@ -710,7 +710,7 @@ static DummyNode* create_dummy_node_with_uuid(
     gu::ssl_register_params(gu_conf);
     gcomm::Conf::register_params(gu_conf);
     string conf = "evs://?" + Conf::EvsViewForgetTimeout + "=PT1H&"
-        + Conf::EvsInactiveCheckPeriod + "=" + to_string(Period(suspect_timeout)/3) + "&"
+        + Conf::EvsInactiveCheckPeriod + "=" + retrans_period + "&"
         + Conf::EvsSuspectTimeout + "=" + suspect_timeout + "&"
         + Conf::EvsInactiveTimeout + "=" + inactive_timeout + "&"
 
@@ -2603,6 +2603,71 @@ START_TEST(test_representative_incarnation_change)
 }
 END_TEST
 
+// Read back the effective value of a period parameter.
+static Period effective_period(const gu::Config& conf, const std::string& key)
+{
+    return Period(conf.get(key));
+}
+
+// evs.inactive_check_period must never exceed evs.keepalive_period.
+START_TEST(test_inactive_check_period_cap)
+{
+    log_info << "START test_inactive_check_period_cap";
+    const gcomm::UUID uuid(1);
+
+    // Default: the check period equals the keepalive period.
+    {
+        gu::Config conf;
+        gcomm::Conf::register_params(conf);
+        gcomm::evs::Proto evs(conf, uuid, 0);
+        ck_assert(effective_period(conf, Conf::EvsInactiveCheckPeriod) <=
+                  effective_period(conf, Conf::EvsKeepalivePeriod));
+    }
+
+    // A check period above the (default) keepalive period is capped.
+    {
+        gu::Config conf;
+        gcomm::Conf::register_params(conf);
+        gcomm::evs::Proto evs(conf, uuid, 0, gu::URI(
+            "evs://?" + Conf::EvsInactiveCheckPeriod + "=PT2S"));
+        ck_assert(effective_period(conf, Conf::EvsInactiveCheckPeriod) <=
+                  effective_period(conf, Conf::EvsKeepalivePeriod));
+    }
+
+    // Capped at the configured keepalive period regardless of the order in
+    // which the options are given.
+    {
+        gu::Config conf;
+        gcomm::Conf::register_params(conf);
+        gcomm::evs::Proto evs(conf, uuid, 0, gu::URI(
+            "evs://?" + Conf::EvsInactiveCheckPeriod + "=PT1S&"
+            + Conf::EvsKeepalivePeriod + "=PT0.2S"));
+        ck_assert(effective_period(conf, Conf::EvsInactiveCheckPeriod) ==
+                  Period("PT0.2S"));
+    }
+
+    // The default check period follows a lowered keepalive period.
+    {
+        gu::Config conf;
+        gcomm::Conf::register_params(conf);
+        gcomm::evs::Proto evs(conf, uuid, 0, gu::URI(
+            "evs://?" + Conf::EvsKeepalivePeriod + "=PT0.2S"));
+        ck_assert(effective_period(conf, Conf::EvsInactiveCheckPeriod) ==
+                  Period("PT0.2S"));
+    }
+
+    // A check period below the keepalive period is left alone.
+    {
+        gu::Config conf;
+        gcomm::Conf::register_params(conf);
+        gcomm::evs::Proto evs(conf, uuid, 0, gu::URI(
+            "evs://?" + Conf::EvsInactiveCheckPeriod + "=PT0.3S"));
+        ck_assert(effective_period(conf, Conf::EvsInactiveCheckPeriod) ==
+                  Period("PT0.3S"));
+    }
+}
+END_TEST
+
 Suite* evs2_suite()
 {
     Suite* s = suite_create("gcomm::evs");
@@ -2788,6 +2853,10 @@ Suite* evs2_suite()
 
     tc = tcase_create("test_out_queue_limit");
     tcase_add_test(tc, test_out_queue_limit);
+    suite_add_tcase(s, tc);
+
+    tc = tcase_create("test_inactive_check_period_cap");
+    tcase_add_test(tc, test_inactive_check_period_cap);
     suite_add_tcase(s, tc);
 
     tc = tcase_create("test_representative_incarnation_change");

@@ -15,10 +15,6 @@
 # Free Software Foundation, Inc., 51 Franklin St, Fifth Floor, Boston
 # MA  02110-1301  USA.
 
-# If without_crypto == 1, the library will be built without
-# SSL/TLS support.
-%{!?without_crypto: %global without_crypto 0}
-
 %define name @CMAKE_PROJECT_NAME@
 %define wsrep_api @GALERA_VERSION_WSREP_API@
 %{!?version: %define version @GALERA_VERSION_WSREP_API@.@GALERA_VERSION_MAJOR@.@GALERA_VERSION_MINOR@@GALERA_VERSION_EXTRA@@GALERA_REVISION@}
@@ -69,9 +65,6 @@
 %define ssl_package_devel libopenssl-devel
 %endif
 
-
-
-
 Name:          %{name}
 Summary:       Galera: a synchronous multi-master wsrep provider (replication engine)
 Group:         System Environment/Libraries
@@ -90,6 +83,7 @@ BuildRequires: check-devel
 BuildRequires: glibc-devel
 BuildRequires: %{ssl_package_devel}
 BuildRequires: cmake
+Conflicts: %{name}-nossl
 
 %if 0%{?suse_version} == 1110
 # On SLES11 SPx use the linked gcc47 to build instead of default gcc43
@@ -158,6 +152,20 @@ of Galera replication engine see https://www.galeracluster.com.
 This software comes with ABSOLUTELY NO WARRANTY. This is free software,
 and you are welcome to modify and redistribute it under the GPLv2 license.
 
+%package nossl
+Group:         System Environment/Libraries
+Conflicts: %{name}
+Summary: Galera: a synchronous multi-master wsrep provider (replication engine)
+
+%description nossl
+Galera is a fast synchronous multimaster wsrep provider (replication engine)
+for transactional databases and similar applications. For more information
+about wsrep API see https://github.com/codership/wsrep-API. For a description
+of Galera replication engine see https://www.galeracluster.com.
+
+This package provides a library which does not have built in crypto
+functionality.
+
 %prep
 %setup -q -n %{name}-%{version}
 # When downloading from GitHub the contents is in a folder
@@ -182,13 +190,21 @@ export CXX=g++-4.7
 
 NUM_JOBS=${NUM_JOBS:-$(ncpu=$(cat /proc/cpuinfo | grep processor | wc -l) && echo $(($ncpu > 4 ? 4 : $ncpu)))}
 
-%if 0%{?without_crypto}
-%define crypto_opt -DGALERA_WITH_SSL:BOOL=OFF
-%endif
+mkdir release
+(
+    cd release
+    cmake -DCMAKE_BUILD_TYPE=Release -DGALERA_WITH_SSL:BOOL=ON ../
+    make %{?_smp_mflags} VERBOSE=1
+    make test ARGS=-V
+)
 
-cmake -DCMAKE_BUILD_TYPE=Release %{?crypto_opt} .
-make -j$(echo $NUM_JOBS) VERBOSE=1
-make test ARGS=-V
+mkdir release_nossl
+(
+    cd release_nossl
+    cmake -DCMAKE_BUILD_TYPE=Release -DGALERA_WITH_SSL:BOOL=OFF ../
+    make %{?_smp_mflags} VERBOSE=1
+    make test ARGS=-V
+)
 
 %install
 RBR=$RPM_BUILD_ROOT # eg. rpmbuild/BUILDROOT/galera-3-3.x-33.1.x86_64
@@ -228,10 +244,11 @@ install -m 644 $RBD/garb/files/garb.cnf $RBR%{_sysconfdir}/sysconfig/garb
 %endif # suse_version
 
 install -d $RBR%{_bindir}
-install -m 755 $RBD/garb/garbd                    $RBR%{_bindir}/garbd
+install -m 755 $RBD/release/garb/garbd                    $RBR%{_bindir}/garbd
 
 install -d $RBR%{libs}
-install -m 755 $RBD/libgalera_smm.so              $RBR%{libs}/libgalera_smm.so
+install -m 755 $RBD/release/libgalera_smm.so              $RBR%{libs}/libgalera_smm.so
+install -m 755 $RBD/release_nossl/libgalera_smm.so        $RBR%{libs}/libgalera_smm_nossl.so
 
 install -d $RBR%{docs}
 install -m 644 $RBD/COPYING                       $RBR%{docs}/COPYING
@@ -258,6 +275,9 @@ install -m 644 $RBD/man/garbd.8        $RBR%{_mandir}/man8/garbd.8
 
 %post
 %systemd_post garb.service
+
+%post nossl
+ln -sf %{libs}/libgalera_smm_nossl.so %{libs}/libgalera_smm.so
 
 %preun
 %systemd_preun garb.service
@@ -346,6 +366,14 @@ fi
 %doc %attr(0644,root,root) %{docs}/README-MySQL
 
 %doc %attr(644, root, man) %{_mandir}/man8/garbd.8*
+
+%files nossl
+%attr(0755,root,root) %dir %{libs}
+%attr(0755,root,root) %{libs}/libgalera_smm_nossl.so
+%attr(0755,root,root) %dir %{docs}
+%doc %attr(0644,root,root) %{docs}/COPYING
+%doc %attr(0644,root,root) %{docs}/LICENSE.asio
+%doc %attr(0644,root,root) %{docs}/README
 
 %clean
 [ "$RPM_BUILD_ROOT" != "/" ] && [ -d $RPM_BUILD_ROOT ] && rm -rf $RPM_BUILD_ROOT;

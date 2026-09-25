@@ -13,6 +13,7 @@ add_library(gcache STATIC
   gcache_page_store.cpp
   gcache_rb_store.cpp
   gcache_mem_store.cpp
+  gcache_test_encryption.cpp
   GCache_memops.cpp
   GCache.cpp
   )

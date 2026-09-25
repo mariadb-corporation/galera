@@ -24,6 +24,7 @@
 #include <gu_logger.hpp>
 #include <gu_serialize.hpp>
 #include <gu_debug_sync.hpp>
+#include <gu_thread_keys.hpp>
 
 #include <string.h> // for mempcpy
 #include <errno.h>
@@ -169,7 +170,9 @@ gcs_core::gcs_core(gu::Config&  conf,
                 core->fifo = gcs_fifo_lite_create (CORE_FIFO_LEN,
                                                    sizeof (core_act_t));
                 if (core->fifo) {
-                    gu_mutex_init  (&core->send_lock, NULL);
+                    gu_mutex_init(
+                        gu::get_mutex_key(gu::GU_MUTEX_KEY_GCS_CORE_SEND),
+                        &core->send_lock);
                     core->proto_ver = -1;
                     // ^^^ shall be bumped in gcs_group_act_conf()
                     core->state = CORE_CLOSED;
@@ -365,6 +368,8 @@ gcs_core_send (gcs_core_t*          const conn,
 
     assert (action != NULL);
     assert (act_size > 0);
+    /* actions passing this way will be put in cache */
+    assert (gcs_act_in_cache(act_type));
 
     /*
      * Action header will be replicated with every message.
@@ -1603,8 +1608,8 @@ gcs_core_caused (gcs_core_t* core, gu::GTID& gtid)
     gu_cond_t    cond;
     causal_act_t act = {&act_id, &act_uuid, &error, &mtx, &cond};
 
-    gu_mutex_init (&mtx, NULL);
-    gu_cond_init  (&cond, NULL);
+    gu_mutex_init (gu::get_mutex_key(gu::GU_MUTEX_KEY_GCS_CORE_CAUSED), &mtx);
+    gu_cond_init  (gu::get_cond_key(gu::GU_COND_KEY_GCS_CORE_CAUSED), &cond);
     gu_mutex_lock (&mtx);
     {
         long ret = core_msg_send_retry (core,
@@ -1657,17 +1662,76 @@ gcs_core_param_get (gcs_core_t* core, const char* key)
     }
 }
 
-void gcs_core_get_status(gcs_core_t* core, gu::Status& status)
+int gcs_core_get_status(gcs_core_t* core, gu::Status& status)
 {
+    int rc = 0;
     if (gu_mutex_lock(&core->send_lock))
-        gu_throw_fatal << "could not lock mutex";
+    {
+        return -ENOTRECOVERABLE;
+    }
     if (core->state < CORE_CLOSED)
     {
         gcs_group_get_status(&core->group, status);
         core->backend.status_get(&core->backend, status);
     }
     gu_mutex_unlock(&core->send_lock);
+    return rc;
 }
+
+int gcs_core_fetch_pfs_info(gcs_core_t*         core,
+                            wsrep_node_info_t** nodes,
+                            uint32_t*           size,
+                            int32_t*            my_index,
+                            uint32_t            max_version)
+{
+    int rc = -ENOTCONN;
+    if (gu_mutex_lock(&core->send_lock))
+    {
+        return -ENOTRECOVERABLE;
+    }
+    if (core->state < CORE_CLOSED)
+    {
+        rc = gcs_group_fetch_pfs_info(&core->group, nodes, size, my_index,
+                                      max_version);
+    }
+    gu_mutex_unlock(&core->send_lock);
+    return rc;
+}
+
+int gcs_core_fetch_pfs_stat(gcs_core_t*         core,
+                            wsrep_node_stat_t** nodes,
+                            uint32_t*           size,
+                            int32_t*            my_index,
+                            uint32_t            max_version)
+{
+    int rc = -ENOTCONN;
+    if (gu_mutex_lock(&core->send_lock))
+    {
+        return -ENOTRECOVERABLE;
+    }
+    if (core->state < CORE_CLOSED)
+    {
+        rc = gcs_group_fetch_pfs_stat(&core->group, nodes, size, my_index,
+                                      max_version);
+    }
+    gu_mutex_unlock(&core->send_lock);
+    return rc;
+}
+
+void gcs_core_get_membership(const gcs_core_t* const   core,
+                             wsrep_allocator_cb const  alloc,
+                             struct wsrep_membership** memb)
+{
+    gcs_group_get_membership(core->group, alloc, memb);
+}
+
+void gcs_core_get_membership(const gcs_core_t* const   core,
+                             wsrep_allocator_cb const  alloc,
+                             struct wsrep_membership_v2** memb)
+{
+    gcs_group_get_membership(core->group, alloc, memb);
+}
+
 
 void gcs_core_get_protocols(gcs_core_t* core, int& appl, int& repl, int& gcs)
 {
@@ -1710,6 +1774,12 @@ gcs_fifo_lite_t*
 gcs_core_get_fifo (gcs_core_t* core)
 {
     return core->fifo;
+}
+
+gcache_t*
+gcs_core_get_gcache(gcs_core_t* core)
+{
+    return core->cache;
 }
 
 #endif /* GCS_CORE_TESTING */

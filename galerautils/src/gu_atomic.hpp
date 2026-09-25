@@ -19,7 +19,7 @@ namespace gu
     class Atomic
     {
     public:
-        Atomic(I i = 0) : i_(i) { }
+        explicit Atomic(I i = 0) : i_(i) { }
 
         I operator()() const
         {

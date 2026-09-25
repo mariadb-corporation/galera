@@ -26,10 +26,12 @@ test_caching_fill_page(gcache::GCache&     gc,
     const PageStore& ps(gc.page_store());
     for (int i(0); i < 3; i++)
     {
-        buf.push_back(gc.malloc(1));
+        void* ptx;
+        buf.push_back(gc.malloc(1, ptx));
         void* const ptr(buf[buf.size() - 1]);
         ck_assert(nullptr != ptr);
-        ck_assert(SEQNO_NONE == ptr2BH(ptr)->seqno_g);
+        ck_assert(nullptr != ptx);
+        ck_assert(SEQNO_NONE == ptr2BH(ptx)->seqno_g);
         ck_assert_msg(ps.count() == expected_page_count,
                       "%d. buf = %zu, ps.count() = %zu (expected %zu)",
                       i, buf.size()-1, ps.count(), expected_page_count);
@@ -41,7 +43,8 @@ START_TEST(top_level_page_caching) // test that caching in pages work
     log_info << "\n#\n# top_level_page_caching\n#";
     const char* const dir_name = "";
     size_t const bh_size = sizeof(gcache::BufferHeader);
-    size_t const page_size = (8 + bh_size)*3; // fits 3 buffers <= 8 bytes
+    size_t const page_size = (8 + bh_size)*3 // fits 3 buffers <= 8 bytes
+                             + gcache::Page::meta_size(BH_size(0));
     size_t const keep_size = 2*page_size;     // keep at least 2 pages
 
     gu::Config cfg;
@@ -146,7 +149,8 @@ START_TEST(top_level_page_caching) // test that caching in pages work
     ck_assert_msg(ps.total_pages() == 2,
                   "total_pages %zu (expected 2)", ps.total_pages());
 
-    buf.push_back(gc.malloc(1));
+    void* ptx;
+    buf.push_back(gc.malloc(1, ptx));
     // this shall allocate one more page and page 5 should go,
     // only 6 and 7 should remain
     ck_assert(ps.count() == 7);
@@ -169,7 +173,8 @@ START_TEST(top_level_page_caching_locking) // test that caching in pages work
     log_info << "\n#\n# top_level_page_caching_locking\n#";
     const char* const dir_name = "";
     size_t const bh_size = sizeof(gcache::BufferHeader);
-    size_t const page_size = (8 + bh_size)*3; // fits 3 buffers <= 8 bytes
+    size_t const page_size = (8 + bh_size)*3 // fits 3 buffers <= 8 bytes
+                             + gcache::Page::meta_size(BH_size(0));
     size_t const keep_size = 2*page_size;     // keep at least 2 pages
 
     gu::Config cfg;
@@ -290,7 +295,8 @@ START_TEST(top_level_seqno_lock_protects_ist_buffers)
     log_info << "\n#\n# top_level_seqno_lock_protects_ist_buffers\n#";
     const char* const dir_name = "";
     size_t const bh_size = sizeof(gcache::BufferHeader);
-    size_t const page_size = (8 + bh_size)*3;
+    size_t const page_size = (8 + bh_size)*3 // fits 3 buffers <= 8 bytes
+                             + gcache::Page::meta_size(BH_size(0));
 
     gu::Config cfg;
     GCache::register_params(cfg);

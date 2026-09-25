@@ -46,8 +46,8 @@ namespace galera
             virtual void ist_trx(const TrxHandleSlavePtr&, bool must_apply,
                                  bool preload) = 0;
             // Process conf change from IST
-            virtual void ist_cc(const gcs_action&, bool must_apply,
-                                bool preload) = 0;
+            virtual void ist_cc(const gcs_act_cchange&,const gcs_action&,
+                                bool must_apply, bool preload) = 0;
             // Report IST end
             virtual void ist_end(const Result&) = 0;
         protected:
@@ -158,7 +158,8 @@ namespace galera
             AsyncSenderMap(gcache::GCache& gcache)
                 :
                 senders_(),
-                monitor_(),
+                monitor_(gu::get_mutex_key(gu::GU_MUTEX_KEY_IST_ASYNC_SENDER),
+                         gu::get_cond_key(gu::GU_COND_KEY_IST_ASYNC_SENDER)),
                 gcache_(gcache)
             { }
 
@@ -184,7 +185,8 @@ namespace galera
 
     // Helper to determine addresses. Public for testing.
     void check_recv_addr(gu::Config& conf);
-    std::string IST_determine_addr(gu::Config& conf, std::string key);
+    std::string IST_determine_addr(gu::Config& conf, std::string key,
+                                   bool tls_service_enabled);
 
 } // namespace galera
 

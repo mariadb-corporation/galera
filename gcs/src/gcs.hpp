@@ -11,7 +11,10 @@
 #ifndef _gcs_h_
 #define _gcs_h_
 
+#include "wsrep_membership_service.h"
+
 #include "gcs_gcache.hpp"
+#include <wsrep_ps.h> // pfs declarations
 
 #include <gu_config.hpp>
 #include <gu_buf.h>
@@ -165,6 +168,13 @@ typedef enum gcs_act_type
 }
 gcs_act_type_t;
 
+/*! returns true if action must be in cache */
+static inline bool
+gcs_act_in_cache(gcs_act_type_t const t)
+{
+    return t <= GCS_ACT_CCHANGE && t != GCS_ACT_COMMIT_CUT;
+}
+
 #define GCS_VOTE_REQUEST 1 /* vote request indicator */
 
 /*! String representations of action types */
@@ -209,6 +219,8 @@ struct gcs_action {
     const void*    buf; /*! unlike input, output goes as a single buffer */
     int32_t        size;
     gcs_act_type_t type;
+
+    bool in_cache() const { return gcs_act_in_cache(type); }
 };
 
 std::ostream& operator <<(std::ostream& os, const gcs_action& act);
@@ -501,7 +513,25 @@ extern void gcs_get_stats (gcs_conn_t *conn, struct gcs_stats* stats);
 /*! flushes stats counters */
 extern void gcs_flush_stats(gcs_conn_t *conn);
 
-void gcs_get_status(gcs_conn_t* conn, gu::Status& status);
+int gcs_get_status(gcs_conn_t* conn, gu::Status& status);
+void gcs_get_membership(const gcs_conn_t* conn,
+                        wsrep_allocator_cb alloc,
+                        struct wsrep_membership** memb);
+
+int gcs_fetch_pfs_info (gcs_conn_t*         conn,
+                        wsrep_node_info_t** nodes,
+                        uint32_t*           size,
+                        int32_t*            my_index,
+                        uint32_t            max_version);
+int gcs_fetch_pfs_stat (gcs_conn_t*         conn,
+                        wsrep_node_stat_t** nodes,
+                        uint32_t*           size,
+                        int32_t*            my_index,
+                        uint32_t            max_version);
+
+void gcs_get_membership(const gcs_conn_t* conn,
+                        wsrep_allocator_cb alloc,
+                        struct wsrep_membership_v2** memb);
 
 /*! A node with this name will be treated as a stateless arbitrator */
 #define GCS_ARBITRATOR_NAME "garb"

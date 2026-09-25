@@ -484,6 +484,9 @@ then
                 BUILD_OPT+=" -DWITH_ZLIB=bundled"
                 BUILD_OPT+=" -DWITH_ASAN:BOOL=ON"
             fi
+            BUILD_OPT+=" -DWITH_KEYRING_VAULT=ON"
+            BUILD_OPT+=" -DWITH_KEYRING_VAULT_TEST=ON"
+
         else # MariaDB-specific build options
             BUILD_OPT+=" -DWITH_SSL=bundled"
             BUILD_OPT+=" -DWITH_READLINE=system"

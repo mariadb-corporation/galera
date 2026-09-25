@@ -22,6 +22,7 @@
 #include <gu_logger.hpp>
 #include <gu_serialize.hpp>
 #include <gu_digest.hpp>
+#include <gu_thread_keys.hpp>
 #include <gu_lock.hpp>
 
 #include <stdlib.h>
@@ -298,7 +299,7 @@ gcs_conn::gcs_conn(gu::Config& conf,
     stats_fc_received(),
     conf_id(),
     need_to_join(),
-    join_mutex(),
+    join_mutex(gu::get_mutex_key(gu::GU_MUTEX_KEY_GCS_JOIN)),
     join_gtid(),
     join_code(),
     sync_sent_(),
@@ -369,9 +370,10 @@ gcs_conn::gcs_conn(gu::Config& conf,
     conn->max_fc_state = conn->params.sync_donor ?
         GCS_CONN_DONOR : GCS_CONN_JOINED;
 
-    gu_mutex_init (&conn->fc_lock, NULL);
-    gu_mutex_init (&conn->vote_lock_, NULL);
-    gu_cond_init  (&conn->vote_cond_, NULL);
+    gu_mutex_init(gu::get_mutex_key(gu::GU_MUTEX_KEY_GCS_FC), &conn->fc_lock);
+    gu_mutex_init(gu::get_mutex_key(gu::GU_MUTEX_KEY_GCS_VOTE),
+                  &conn->vote_lock_);
+    gu_cond_init(gu::get_cond_key(gu::GU_COND_KEY_GCS_VOTE), &conn->vote_cond_);
 
     conn->progress_cb_ = progress_cb;
     conn->progress_ = NULL;
@@ -1008,7 +1010,9 @@ static void
 gcs_handle_act_conf (gcs_conn_t* conn, gcs_act_rcvd& rcvd)
 {
     const gcs_act& act(rcvd.act);
-    gcs_act_cchange const conf(act.buf, act.buf_len);
+    const void* ptx = gcs_gcache_get_ro_plaintext(conn->gcache, act.buf);
+    gcs_act_cchange const conf(ptx, act.buf_len);
+    gcs_gcache_drop_plaintext(conn->gcache, act.buf);
 
     assert(rcvd.id >= 0 || 0 == conf.memb.size());
     assert(conf.vote_res <= 0);
@@ -1482,7 +1486,7 @@ static void *gcs_recv_thread (void *arg)
 
     // To avoid race between gcs_open() and the following state check in while()
     gu_cond_t tmp_cond; /* TODO: rework when concurrency in SM is allowed */
-    gu_cond_init (&tmp_cond, NULL);
+    gu_cond_init (gu::get_cond_key(gu::GU_COND_KEY_GCS_RECV_THREAD), &tmp_cond);
 
     if ((ret = gcs_sm_enter(conn->sm, &tmp_cond, false, true)))
     {
@@ -1702,7 +1706,7 @@ long gcs_open (gcs_conn_t* conn, const char* channel, const char* url,
     if ((ret = gcs_sm_open(conn->sm))) return ret; // open in case it is closed
 
     gu_cond_t tmp_cond; /* TODO: rework when concurrency in SM is allowed */
-    gu_cond_init (&tmp_cond, NULL);
+    gu_cond_init (gu::get_cond_key(gu::GU_COND_KEY_GCS_OPEN), &tmp_cond);
 
     if ((ret = gcs_sm_enter (conn->sm, &tmp_cond, false, true)))
     {
@@ -1716,8 +1720,10 @@ long gcs_open (gcs_conn_t* conn, const char* channel, const char* url,
 
             _reset_pkt_size(conn);
 
-            if (!(ret = gu_thread_create (&conn->recv_thread, NULL,
-                                          gcs_recv_thread, conn))) {
+            if (!(ret = gu_thread_create (
+                      gu::get_thread_key(gu::GU_THREAD_KEY_GCS_RECV),
+                      &conn->recv_thread,
+                      gcs_recv_thread, conn))) {
                 gcs_fifo_lite_open(conn->repl_q);
                 gu_fifo_open(conn->recv_q);
                 gcs_shift_state (conn, GCS_CONN_OPEN);
@@ -1789,7 +1795,7 @@ gcs_conn::~gcs_conn()
     auto conn(this); // to minimize diff
     int err;
     gu_cond_t tmp_cond;
-    gu_cond_init (&tmp_cond, NULL);
+    gu_cond_init (gu::get_cond_key(gu::GU_COND_KEY_GCS_DESTROY), &tmp_cond);
 
     if (!(err = gcs_sm_enter (conn->sm, &tmp_cond, false, true))) // need an error here
     {
@@ -1830,6 +1836,8 @@ gcs_conn::~gcs_conn()
         gu_abort();
     }
 
+    gu_cond_destroy(&conn->vote_cond_);
+    gu_mutex_destroy(&conn->vote_lock_);
     /* This must not last for long */
     while (gu_mutex_destroy (&conn->fc_lock));
 }
@@ -1873,7 +1881,7 @@ long gcs_sendv (gcs_conn_t*          const conn,
          *  @note: gcs_repl() and gcs_recv() cannot lock connection
          *         because they block indefinitely waiting for actions */
         gu_cond_t tmp_cond;
-        gu_cond_init (&tmp_cond, NULL);
+        gu_cond_init (gu::get_cond_key(gu::GU_COND_KEY_GCS_SENDV), &tmp_cond);
 
         if (!(ret = gcs_sm_enter (conn->sm, &tmp_cond, scheduled, true))) {
             while ((GCS_CONN_OPEN >= conn->state) &&
@@ -1928,8 +1936,10 @@ long gcs_replv (gcs_conn_t*          const conn,      //!<in
     /* This is good - we don't have to do a copy because we wait */
     struct gcs_repl_act repl_act(act_in, act);
 
-    gu_mutex_init (&repl_act.wait_mutex, NULL);
-    gu_cond_init  (&repl_act.wait_cond,  NULL);
+    gu_mutex_init (gu::get_mutex_key(gu::GU_MUTEX_KEY_GCS_REPL_ACT_WAIT),
+                   &repl_act.wait_mutex);
+    gu_cond_init  (gu::get_cond_key(gu::GU_COND_KEY_GCS_REPL_ACT_WAIT),
+                   &repl_act.wait_cond);
 
     /* Send action and wait for signal from recv_thread
      * we need to lock a mutex before we can go wait for signal */
@@ -2117,6 +2127,7 @@ long gcs_request_state_transfer (gcs_conn_t*    conn,
             assert (action.buf != rst);
 #ifndef GCS_FOR_GARB
             assert (action.buf != NULL);
+            // first need to increment ref count
             gcs_gcache_free (conn->gcache, action.buf);
 #else
             assert (action.buf == NULL);
@@ -2298,7 +2309,7 @@ gcs_set_last_applied (gcs_conn_t* conn, const gu::GTID& gtid)
     assert(gtid.seqno() >= 0);
 
     gu_cond_t cond;
-    gu_cond_init (&cond, NULL);
+    gu_cond_init (gu::get_cond_key(gu::GU_COND_KEY_GCS_SET_LAST_APPLIED), &cond);
 
     long ret = gcs_sm_enter (conn->sm, &cond, false, false);
 
@@ -2513,12 +2524,75 @@ gcs_flush_stats(gcs_conn_t* conn)
     conn->stats_fc_received  = 0;
 }
 
-void gcs_get_status(gcs_conn_t* conn, gu::Status& status)
+int gcs_get_status(gcs_conn_t* conn, gu::Status& status)
 {
     if (conn->state < GCS_CONN_CLOSED)
     {
-        gcs_core_get_status(conn->core, status);
+        return gcs_core_get_status(conn->core, status);
     }
+    return 0;
+}
+
+void gcs_get_membership(const gcs_conn_t* const   conn,
+                        wsrep_allocator_cb const  alloc,
+                        struct wsrep_membership** memb)
+{
+    gcs_core_get_membership(conn->core, alloc, memb);
+}
+
+int gcs_fetch_pfs_info (gcs_conn_t*         conn,
+                        wsrep_node_info_t** nodes,
+                        uint32_t*           size,
+                        int32_t*            my_index,
+                        uint32_t            max_version)
+{
+    int rc;
+    if (conn->state < GCS_CONN_CLOSED)
+    {
+        rc = gcs_core_fetch_pfs_info(conn->core, nodes, size, my_index,
+                                     max_version);
+    }
+    else
+    {
+        rc = -ENOTCONN;
+    }
+    if (rc) {
+        *nodes = NULL;
+        *size = 0;
+        *my_index = -1;
+    }
+    return rc;
+}
+
+int gcs_fetch_pfs_stat (gcs_conn_t*         conn,
+                        wsrep_node_stat_t** nodes,
+                        uint32_t*           size,
+                        int32_t*            my_index,
+                        uint32_t            max_version)
+{
+    int rc;
+    if (conn->state < GCS_CONN_CLOSED)
+    {
+        rc = gcs_core_fetch_pfs_stat(conn->core, nodes, size, my_index,
+                                     max_version);
+    }
+    else
+    {
+        rc = -ENOTCONN;
+    }
+    if (rc) {
+        *nodes = NULL;
+        *size = 0;
+        *my_index = -1;
+    }
+    return rc;
+}
+
+void gcs_get_membership(const gcs_conn_t* const   conn,
+                        wsrep_allocator_cb const  alloc,
+                        struct wsrep_membership_v2** memb)
+{
+    gcs_core_get_membership(conn->core, alloc, memb);
 }
 
 static long

@@ -14,39 +14,68 @@ THIS_DIR=$(pwd -P)
 
 RPM_TOP_DIR=$SCRIPT_ROOT/rpm_top_dir
 rm -rf $RPM_TOP_DIR
-mkdir -p $RPM_TOP_DIR/RPMS
-ln -s ../../../ $RPM_TOP_DIR/BUILD
+mkdir -p $RPM_TOP_DIR/{BUILD,RPMS,SOURCES,SPECS,SRPMS}
+PROJECT_ROOT=$(cd $SCRIPT_ROOT/../..; pwd -P)
+CMAKE_BUILD_DIR=$RPM_TOP_DIR/cmake_build
+mkdir -p $CMAKE_BUILD_DIR
 
-fast_cflags="-O3 -fno-omit-frame-pointer"
-uname -m | grep -q i686 && \
-cpu_cflags="-mtune=i686" || cpu_cflags="-mtune=core2"
-RPM_OPT_FLAGS="$fast_cflags $cpu_cflags"
-GALERA_SPEC=$SCRIPT_ROOT/galera.spec
+pushd $CMAKE_BUILD_DIR > /dev/null
+# Generate CPack config
+cmake $PROJECT_ROOT
+# Create source package with the specified version
+cpack --config CPackSourceConfig.cmake -D CPACK_PACKAGE_VERSION=$1 -G TGZ
+mv galera-4-$1.tar.gz $RPM_TOP_DIR/SOURCES/
+popd > /dev/null
+
+export CK_TIMEOUT_MULTIPLIER=7
+
+GALERA_SPEC=$SCRIPT_ROOT/galera-4.spec
 
 RELEASE=${RELEASE:-"1"}
 
-if  [ -r /etc/fedora-release ]
+DISTRO_VERSION=
+if  [ -r /etc/os-release ]
 then
-    DISTRO_VERSION=fc$(rpm -qf --qf '%{version}\n' /etc/fedora-release)
-elif [ -r /etc/redhat-release ]
-then
-    DISTRO_VERSION=rhel$(rpm -qf --qf '%{version}\n' /etc/redhat-release)
+    source /etc/os-release
 elif [ -r /etc/SuSE-release ]
 then
     DISTRO_VERSION=sles$(rpm -qf --qf '%{version}\n' /etc/SuSE-release | cut -d. -f1)
-else
-    DISTRO_VERSION=
 fi
 
-[ -n "$DISTRO_VERSION" ] && RELEASE=$RELEASE.$DISTRO_VERSION
+DIST_TAG=
+# %dist does not return a value for sles12
+# https://bugs.centos.org/view.php?id=3239
+if [ "${DISTRO_VERSION}" = "sles12" ]
+then
+  DIST_TAG=".sles12"
+elif [ "${DISTRO_VERSION}" = "sles42" ]
+then
+  DIST_TAG=".sles42"
+fi
 
-$(which rpmbuild) --clean --define "_topdir $RPM_TOP_DIR" \
-                  --define "optflags $RPM_OPT_FLAGS" \
+if [ -z "$DIST_TAG" ]
+then
+  DIST_TAG=$(rpm --eval "%{dist}")
+  if [ "$DIST_TAG" = "%{dist}" ]
+  then
+    DIST_TAG=
+  fi
+fi
+
+# from /etc/os-release
+if  [ -z "$DIST_TAG" ]
+then
+  VERSION_ID=${VERSION_ID:-}
+  DIST_TAG=".${ID:-unknown}${VERSION_ID%%.*}"
+fi
+
+rpmbuild --clean --define "_topdir $RPM_TOP_DIR" \
                   --define "version $1" \
-                  --define "release $RELEASE" \
-                  -bb --short-circuit -bi $GALERA_SPEC
+                  --define "dist ${DIST_TAG}" \
+                  ${JOBS:+--define "_smp_mflags -j$JOBS"} \
+                  -bb $GALERA_SPEC || (rpm --showrc && exit 1)
 
-RPM_ARCH=$(uname -m | sed s/i686/i386/)
+RPM_ARCH=$(rpm --showrc | grep "^build arch" | awk '{print $4}')
 
 mv $RPM_TOP_DIR/RPMS/$RPM_ARCH/galera-*.rpm ./
 

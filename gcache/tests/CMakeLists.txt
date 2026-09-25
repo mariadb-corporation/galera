@@ -3,6 +3,7 @@
 #
 
 add_executable(gcache_tests
+  gcache_enc_test.cpp
   gcache_mem_test.cpp
   gcache_page_test.cpp
   gcache_rb_test.cpp

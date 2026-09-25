@@ -1,4 +1,4 @@
-/* Copyright (C) 2010-2017 Codership Oy <info@codersip.com> */
+/* Copyright (C) 2010-2020 Codership Oy <info@codersip.com> */
 
 #include "replicator_smm.hpp"
 
@@ -211,7 +211,7 @@ galera::ReplicatorSMM::stats_get() const
     sv[STATS_LOCAL_REPLAYS      ].value._int64  = local_replays_();
 
     struct gcs_stats stats;
-    gcs_.get_stats (&stats);
+    gcs_.get_stats(&stats);
 
     sv[STATS_PROTO_APPL          ].value._int64  = stats.proto_appl;
     sv[STATS_PROTO_REPL          ].value._int64  = stats.proto_repl;
@@ -280,7 +280,8 @@ galera::ReplicatorSMM::stats_get() const
 
     // Get gcs backend status
     gu::Status status;
-    gcs_.get_status(status);
+    int gcs_rc = gcs_.get_status(status);
+
 #ifdef GU_DBUG_ON
     status.insert("debug_sync_waiters", gu_debug_sync_waiters());
 #endif // GU_DBUG_ON
@@ -288,11 +289,13 @@ galera::ReplicatorSMM::stats_get() const
     // Dynamical strings are copied into buffer allocated after stats var array.
     // Compute space needed.
     size_t tail_size(0);
-    for (gu::Status::const_iterator i(status.begin()); i != status.end(); ++i)
+    if (gcs_rc == 0)
     {
-        tail_size += i->first.size() + 1 + i->second.size() + 1;
+        for (gu::Status::const_iterator i(status.begin()); i != status.end(); ++i)
+        {
+            tail_size += i->first.size() + 1 + i->second.size() + 1;
+        }
     }
-
     gu::Lock lock_inc(incoming_mutex_);
     tail_size += incoming_list_.size() + 1;
 
@@ -321,19 +324,22 @@ galera::ReplicatorSMM::stats_get() const
 
         // Iterate over dynamical status variables and assign strings
         size_t sv_pos(STATS_INCOMING_LIST + 1);
-        for (gu::Status::const_iterator i(status.begin());
-             i != status.end(); ++i, ++sv_pos)
+        if (gcs_rc == 0)
         {
-            // Name
-            strncpy(tail_buf, i->first.c_str(), i->first.size() + 1);
-            sv[sv_pos].name = tail_buf;
-            tail_buf += i->first.size() + 1;
-            // Type
-            sv[sv_pos].type = WSREP_VAR_STRING;
-            // Value
-            strncpy(tail_buf, i->second.c_str(), i->second.size() + 1);
-            sv[sv_pos].value._string = tail_buf;
-            tail_buf += i->second.size() + 1;
+            for (gu::Status::const_iterator i(status.begin());
+                 i != status.end(); ++i, ++sv_pos)
+            {
+                // Name
+                strncpy(tail_buf, i->first.c_str(), i->first.size() + 1);
+                sv[sv_pos].name = tail_buf;
+                tail_buf += i->first.size() + 1;
+                // Type
+                sv[sv_pos].type = WSREP_VAR_STRING;
+                // Value
+                strncpy(tail_buf, i->second.c_str(), i->second.size() + 1);
+                sv[sv_pos].value._string = tail_buf;
+                tail_buf += i->second.size() + 1;
+            }
         }
 
         assert(sv_pos == sv.size() - 1);
@@ -381,4 +387,165 @@ void
 galera::ReplicatorSMM::stats_free(struct wsrep_stats_var* arg)
 {
     gu_free(arg);
+}
+
+wsrep_status_t
+galera::ReplicatorSMM::fetch_pfs_info(wsrep_node_info_t** nodes_arg,
+                                      uint32_t*           size,
+                                      int32_t*            my_index,
+                                      uint32_t            max_version)
+{
+    if (max_version < WSREP_PS_MIN_API_VERSION)
+    {
+        return WSREP_NOT_IMPLEMENTED;
+    }
+    int rc = gcs_.fetch_pfs_info(nodes_arg, size, my_index, max_version);
+    if (rc == 0)
+    {
+        int index = *my_index;
+        wsrep_node_info_t* nodes = *nodes_arg;
+        /* Sequence number of the last committed transaction: */
+        wsrep_gtid last_committed;
+        (void)last_committed_id(&last_committed);
+        nodes[index].wsrep_last_committed = last_committed.seqno;
+        /* Total number and total size of write-sets replicated: */
+        nodes[index].wsrep_replicated = replicated_();
+        nodes[index].wsrep_replicated_bytes = replicated_bytes_();
+        /* Total number and total size of write-sets received: */
+        nodes[index].wsrep_received = as_->received();
+        nodes[index].wsrep_received_bytes = as_->received_bytes();
+        /* Total number of local transactions that were aborted by slave
+           transactions while in execution: */
+        nodes[index].wsrep_local_bf_aborts = local_cert_failures_();
+        /* Total number of local transactions committed: */
+        nodes[index].wsrep_local_commits = local_commits_();
+        /* Total number of local transactions that failed
+           certification test: */
+        nodes[index].wsrep_local_cert_failures = local_cert_failures_();
+        /* Average distance between the highest and lowest concurrently
+           applied seqno: */
+        double out_of_order_entered;
+        double out_of_order_left;
+        double out_of_order_window;
+        long long out_of_order_waits;
+        apply_monitor_.get_stats(&out_of_order_entered,
+                                 &out_of_order_left,
+                                 &out_of_order_window,
+                                 &out_of_order_waits);
+        nodes[index].wsrep_apply_window = out_of_order_window;
+        /* Average distance between the highest and lowest concurrently
+           commited seqno: */
+        commit_monitor_.get_stats(&out_of_order_entered,
+                                  &out_of_order_left,
+                                  &out_of_order_window,
+                                  &out_of_order_waits);
+        nodes[index].wsrep_commit_window = out_of_order_window;
+        return WSREP_OK;
+    }
+    else if (rc == -ENOTCONN)
+    {
+        *nodes_arg = NULL;
+        *size = 0;
+        *my_index = -1;
+        return WSREP_OK;
+    }
+    else
+    {
+        return WSREP_NODE_FAIL;
+    }
+}
+
+void galera::ReplicatorSMM::free_pfs_info(wsrep_node_info_t* nodes)
+{
+    if (nodes)
+    {
+        gu_free(nodes);
+    }
+}
+
+wsrep_status_t
+galera::ReplicatorSMM::fetch_pfs_stat(wsrep_node_stat_t** nodes_arg,
+                                      uint32_t*           size,
+                                      int32_t*            my_index,
+                                      uint32_t            max_version)
+{
+    if (max_version < WSREP_PS_MIN_API_VERSION)
+    {
+        return WSREP_NOT_IMPLEMENTED;
+    }
+    int rc = gcs_.fetch_pfs_stat(nodes_arg, size, my_index, max_version);
+    if (rc == 0)
+    {
+        wsrep_node_stat_t* node = *nodes_arg + *my_index;
+        /* Total number of keys replicated: */
+        node->wsrep_repl_keys = keys_count_();
+        /* Total size of keys replicated: */
+        node->wsrep_repl_keys_bytes = keys_bytes_();
+        /* Total size of data replicated: */
+        node->wsrep_repl_data_bytes = data_bytes_();
+        /* Total size of other bits replicated: */
+        node->wsrep_repl_other_bytes = unrd_bytes_();
+        /* Total number of transaction replays due to asymmetric lock
+           granularity: */
+        node->wsrep_local_replays = local_replays_();
+        /* Current (instantaneous) length of the send queue: */
+        struct gcs_stats stats;
+        gcs_.get_stats(&stats);
+        node->wsrep_local_send_queue = stats.send_q_len;
+        /* Send queue length averaged over time since the last
+           FLUSH STATUS command: */
+        node->wsrep_local_send_queue_avg = stats.send_q_len_avg;
+        /* Current (instantaneous) length of the recv queue: */
+        node->wsrep_local_recv_queue = stats.recv_q_len;
+        /* Recv queue length averaged over interval since the last
+           FLUSH STATUS command: */
+        node->wsrep_local_recv_queue_avg = stats.recv_q_len_avg;
+        /* The fraction of time (out of 1.0) since the last
+           SHOW GLOBAL STATUS that flow control is effective: */
+        node->wsrep_flow_control_paused = stats.fc_paused_ns;
+        /* The number of flow control messages sent by the local node
+           to the cluster: */
+        node->wsrep_flow_control_sent = stats.fc_ssent;
+        /* The number of flow control messages the node has received,
+           including those the node has sent: */
+        node->wsrep_flow_control_recv = stats.fc_received;
+        /* This variable shows whether a node has flow control
+           enabled for normal traffic: */
+        strcpy(node->wsrep_flow_control_status,
+               stats.fc_active ? "TRUE" : "FALSE");
+        /* Average distance between the highest and lowest seqno
+           value that can be possibly applied in parallel: */
+        double avg_cert_interval;
+        double avg_deps_distance;
+        size_t index_size;
+        cert_.stats_get(avg_cert_interval, avg_deps_distance, index_size);
+        node->wsrep_cert_deps_distance = avg_deps_distance;
+        /* The number of locally running transactions which have been
+           registered inside the wsrep provider: */
+        Wsdb::stats wsdb_stats(wsdb_.get_stats());
+        node->wsrep_open_transactions = wsdb_stats.n_trx_;
+        /* This status variable provides figures for the replication
+           latency on group communication: */
+        node->wsrep_evs_repl_latency = 0;
+        return WSREP_OK;
+    }
+    else if (rc == -ENOTCONN)
+    {
+        *nodes_arg = NULL;
+        *size = 0;
+        *my_index = -1;
+        return WSREP_OK;
+    }
+    else
+    {
+        return WSREP_NODE_FAIL;
+    }
+}
+
+void galera::ReplicatorSMM::free_pfs_stat(wsrep_node_stat_t* nodes)
+{
+    if (nodes)
+    {
+        gu_free(nodes);
+    }
 }

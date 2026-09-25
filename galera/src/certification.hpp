@@ -1,5 +1,5 @@
 //
-// Copyright (C) 2010-2018 Codership Oy <info@codership.com>
+// Copyright (C) 2010-2019 Codership Oy <info@codership.com>
 //
 
 #ifndef GALERA_CERTIFICATION_HPP
@@ -11,6 +11,8 @@
 #include "key_entry_ng.hpp"
 #include "galera_service_thd.hpp"
 #include "galera_view.hpp"
+
+#include <GCache.hpp>
 
 #include <gu_shared_ptr.hpp>
 #include <gu_unordered.hpp>
@@ -57,7 +59,7 @@ namespace galera
             TEST_FAILED
         } TestResult;
 
-        Certification(gu::Config& conf, ServiceThd* thd);
+        Certification(gu::Config& conf, gcache::GCache& cache, ServiceThd* thd);
         ~Certification();
 
         void assign_initial_position(const gu::GTID& gtid, int version);
@@ -231,6 +233,7 @@ namespace galera
 
         int           version_;
         gu::Config&   conf_;
+        gcache::GCache& gcache_;
         TrxMap        trx_map_;
         CertIndexNG   cert_index_ng_;
         NBOMap        nbo_map_;

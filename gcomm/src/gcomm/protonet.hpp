@@ -128,6 +128,7 @@ public:
 
     virtual size_t mtu() const = 0;
 
+    virtual bool tls_service_enabled() const = 0;
 protected:
 
     std::deque<Protostack*> protos_;

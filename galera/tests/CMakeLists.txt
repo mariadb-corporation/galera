@@ -29,7 +29,11 @@ target_compile_options(galera_check
   -Wno-unused-parameter
   )
 
-target_link_libraries(galera_check galera_smm_static ${GALERA_UNIT_TEST_LIBS})
+target_link_libraries(galera_check
+  galera_smm_static
+  ${GALERA_UNIT_TEST_LIBS}
+  ${Boost_FILESYSTEM_LIBRARY}
+  ${Boost_SYSTEM_LIBRARY})
 
 add_test(
   NAME galera_check

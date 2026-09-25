@@ -138,10 +138,17 @@ elif x86:
             if sysname == 'linux':
                 link_arch = ' -Wl,-melf_i386'
     else:
-        compile_arch = ' -m64'
-        if sysname == 'linux':
+        if machine == 'ppc64':
+          compile_arch = ' -mtune=native'
+          link_arch = ' -Wl,-melf64ppc'
+        elif machine == 'ppc64le':
+          compile_arch = ' -mtune=native'
+          link_arch = ' -Wl,-melf64lppc'
+        else:
+          compile_arch = ' -m64'
+          if sysname == 'linux':
             link_arch = ' -Wl,-melf_x86_64'
-    link_arch = compile_arch + link_arch
+        link_arch = compile_arch + link_arch
 
 boost      = int(ARGUMENTS.get('boost', 1))
 boost_pool = int(ARGUMENTS.get('boost_pool', 0))
@@ -158,13 +165,16 @@ static_ssl = ARGUMENTS.get('static_ssl', None)
 install = ARGUMENTS.get('install', None)
 version_script = int(ARGUMENTS.get('version_script', 1))
 
-GALERA_VER = ARGUMENTS.get('version', '4.27')
+GALERA_VER = ARGUMENTS.get('version', '4.28')
 GALERA_REV = ARGUMENTS.get('revno', 'XXXX')
 
 # Attempt to read from file if not given
 if GALERA_REV == "XXXX" and os.path.isfile("GALERA_REVISION"):
-    with open("GALERA_REVISION", "r") as f:
+    f = open("GALERA_REVISION", "r")
+    try:
         GALERA_REV = f.readline().rstrip("\n")
+    finally:
+        f.close()
 
 # export to any module that might have use of those
 Export('GALERA_VER', 'GALERA_REV')
@@ -402,6 +412,16 @@ int main() { SSL_CTX* ctx=NULL; EC_KEY* ecdh=NULL; return !SSL_CTX_set_tmp_ecdh(
     context.Result(result)
     return result
 
+def CheckStdSeedSeq(context):
+    test_source = """
+#include <random>
+int main() { std::seed_seq seeds{1, 2}; }
+"""
+    context.Message('Checking for std::seed_seq ...')
+    result = context.TryLink(test_source, '.cpp')
+    context.Result(result)
+    return result
+
 def CheckVersionScript(context):
     test_source = """
 int main() { return 0; }
@@ -423,10 +443,11 @@ conf = Configure(env, custom_tests = {
     'CheckTr1UnorderedMap': CheckTr1UnorderedMap,
     'CheckWeffcpp': CheckWeffcpp,
     'CheckSetEcdhAuto': CheckSetEcdhAuto,
-    'CheckSetTmpEcdh': CheckSetTmpEcdh
+    'CheckSetTmpEcdh': CheckSetTmpEcdh,
+    'CheckStdSeedSeq': CheckStdSeedSeq
 })
 
-conf.env.Append(CPPPATH = [ '#/wsrep/src' ])
+conf.env.Append(CPPPATH = [ '#/wsrep/src' '#/wsrep/ps' ])
 
 # System headers and libraries
 
@@ -666,6 +687,10 @@ if have_ssl:
     # Enable SSL compilation
     conf.env.Append(CPPFLAGS = ' -DGALERA_HAVE_SSL=1')
 
+# STD library support
+if conf.CheckStdSeedSeq():
+    conf.env.Append(CPPFLAGS = ' -DHAVE_STD_SEED_SEQ')
+
 # these will be used only with our software
 if strict_build_flags == 1:
     conf.env.Append(CCFLAGS = ' -Werror ')
@@ -749,6 +774,22 @@ if sysname != 'darwin':
     if not conf.CheckLib('rt'):
         print('Error: realtime library not found or not usable')
         Exit(1)
+
+if not conf.CheckCXXHeader('boost/filesystem.hpp'):
+    print('Error: boost/filesystem.hpp file not found or not usable')
+    Exit(1)
+
+if not conf.CheckLib('boost_system',
+                     language = 'CXX',
+                     autoadd = 0):
+    print('Error: boost_system library not found or not usable')
+    Exit(1)
+
+if not conf.CheckLib('boost_filesystem',
+                     language = 'CXX',
+                     autoadd = 0):
+    print('Error: boost_filesystem library not found or not usable')
+    Exit(1)
 
 conf.Finish()
 

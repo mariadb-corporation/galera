@@ -175,7 +175,7 @@ START_TEST(gu_fifo_cancel_test)
     gu_mutex_lock (&sync_mtx);
 
     gu_thread_t thread;
-    gu_thread_create (&thread, NULL, cancel_thread, q);
+    gu_thread_create (NULL, &thread, cancel_thread, q);
 
     /* sync with child thread */
     gu_fifo_lock (q);

@@ -1,5 +1,5 @@
 //
-// Copyright (C) 2015 Codership Oy <info@codership.com>
+// Copyright (C) 2015-2019 Codership Oy <info@codership.com>
 //
 
 #ifndef GALERA_NBO_HPP
@@ -17,11 +17,11 @@
 #include "wsrep_api.h"
 
 #include <map>
+#include <vector>
 
 namespace galera
 {
     class TrxHandleSlave;
-    class MappedBuffer;
 
     // Helper datatypes for NBO
 
@@ -32,8 +32,8 @@ namespace galera
     public:
         NBOCtx()
             :
-            mutex_(),
-            cond_ (),
+            mutex_(gu::get_mutex_key(gu::GU_MUTEX_KEY_NBO)),
+            cond_ (gu::get_cond_key(gu::GU_COND_KEY_NBO)),
             ts_   (),
             aborted_(false)
         { }
@@ -141,9 +141,11 @@ namespace galera
     class NBOEntry
     {
     public:
+        typedef std::vector<gu::byte_t> Buffer;
+
         NBOEntry(
             gu::shared_ptr<TrxHandleSlave>::type ts,
-            gu::shared_ptr<MappedBuffer>::type buf,
+            gu::shared_ptr<Buffer>::type buf,
             gu::shared_ptr<NBOCtx>::type nbo_ctx)
             :
             ts_ (ts),
@@ -178,7 +180,7 @@ namespace galera
 
     private:
         gu::shared_ptr<TrxHandleSlave>::type ts_;
-        gu::shared_ptr<MappedBuffer>::type   buf_;
+        gu::shared_ptr<Buffer>::type         buf_;
         View::MembSet                        ended_set_;
         gu::shared_ptr<NBOCtx>::type         nbo_ctx_;
     };

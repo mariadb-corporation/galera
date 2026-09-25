@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2008-2015 Codership Oy <info@codership.com>
+ * Copyright (C) 2008-2019 Codership Oy <info@codership.com>
  *
  * $Id$
  */
@@ -20,6 +20,8 @@
 
 #ifndef _gcs_core_h_
 #define _gcs_core_h_
+
+#include <wsrep_ps.h> // pfs declarations
 
 #include "gcs.hpp"
 #include "gcs_act.hpp"
@@ -171,7 +173,31 @@ gcs_core_param_set (gcs_core_t* core, const char* key, const char* value);
 extern const char*
 gcs_core_param_get (gcs_core_t* core, const char* key);
 
-void gcs_core_get_status(gcs_core_t* core, gu::Status& status);
+int gcs_core_get_status(gcs_core_t* core, gu::Status& status);
+
+int gcs_core_fetch_pfs_info(gcs_core_t*         core,
+                            wsrep_node_info_t** nodes,
+                            uint32_t*           size,
+                            int32_t*            my_index,
+                            uint32_t            max_version);
+
+int gcs_core_fetch_pfs_stat(gcs_core_t*         core,
+                            wsrep_node_stat_t** nodes,
+                            uint32_t*           size,
+                            int32_t*            my_index,
+                            uint32_t            max_version);
+
+void gcs_core_get_membership(const gcs_core_t* core,
+                             wsrep_allocator_cb alloc,
+                             struct wsrep_membership** memb);
+
+void gcs_core_get_membership(const gcs_core_t* core,
+                             wsrep_allocator_cb alloc,
+                             struct wsrep_membership** memb);
+
+void gcs_core_get_membership(const gcs_core_t* core,
+                             wsrep_allocator_cb alloc,
+                             struct wsrep_membership_v2** memb);
 
 void gcs_core_get_protocols(gcs_core_t* core, int& appl, int& repl, int& gcs);
 
@@ -206,6 +232,9 @@ gcs_core_get_group (const gcs_core_t* core);
 #include "gcs_fifo_lite.hpp"
 extern gcs_fifo_lite_t*
 gcs_core_get_fifo (gcs_core_t* core);
+
+extern gcache_t*
+gcs_core_get_gcache(gcs_core_t* core);
 
 #endif /* GCS_CORE_TESTING */
 

@@ -10,7 +10,7 @@
 
 
 namespace {
-    gu::Mutex sync_mutex;
+    gu::Mutex sync_mutex(0);
     typedef std::multimap<std::string, gu::Cond*> SyncMap;
     SyncMap sync_waiters;
 }
@@ -20,7 +20,7 @@ namespace {
 void gu_debug_sync_wait(const std::string& sync)
 {
     gu::Lock lock(sync_mutex);
-    gu::Cond cond;
+    gu::Cond cond(0);
     log_debug << "enter sync wait '" << sync << "'";
     SyncMap::iterator i(
         sync_waiters.insert(std::make_pair(sync, &cond)));

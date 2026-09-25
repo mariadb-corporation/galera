@@ -6,8 +6,9 @@
 #include "certification.hpp"
 #include "trx_handle.hpp"
 #include "key_os.hpp"
-#include "GCache.hpp"
-#include "gu_config.hpp"
+
+#include "galera_test_env.hpp"
+
 #include "gu_inttypes.hpp"
 #include "test_key.hpp"
 
@@ -15,43 +16,6 @@
 
 namespace
 {
-    class TestEnv
-    {
-    public:
-
-        TestEnv() :
-            conf_   (),
-            init_   (conf_),
-            gcache_pcb_
-            (galera::ProgressCallback<int64_t>(WSREP_MEMBER_UNDEFINED,
-                                               WSREP_MEMBER_UNDEFINED)),
-            gcache_ (&gcache_pcb_, conf_, ".")
-        { }
-
-        ~TestEnv() { ::unlink(GCACHE_NAME.c_str()); }
-
-        gu::Config&         conf()   { return conf_  ; }
-        gcache::GCache&     gcache() { return gcache_; }
-    private:
-
-        static std::string const GCACHE_NAME;
-
-        gu::Config                        conf_;
-
-        struct Init
-        {
-            galera::ReplicatorSMM::InitConfig init_;
-
-            Init(gu::Config& conf) : init_(conf, NULL, NULL)
-            {
-                conf.set("gcache.name", GCACHE_NAME);
-                conf.set("gcache.size", "1M");
-            }
-        }                                 init_;
-        galera::ProgressCallback<int64_t> gcache_pcb_;
-        gcache::GCache                    gcache_;
-    };
-
     struct WSInfo
     {
         wsrep_uuid_t     uuid;
@@ -72,107 +36,125 @@ namespace
     };
 }
 
-std::string const TestEnv::GCACHE_NAME = "cert.cache";
-
 static
-void run_wsinfo(const WSInfo* const wsi, size_t const nws, int const version)
+void run_wsinfo(const WSInfo* const wsi, size_t const nws, int const version,
+                bool const enc)
 {
     galera::TrxHandleMaster::Pool mp(
         sizeof(galera::TrxHandleMaster) + sizeof(galera::WriteSetOut),
         16, "certification_mp");
     galera::TrxHandleSlave::Pool sp(
         sizeof(galera::TrxHandleSlave), 16, "certification_sp");
-    TestEnv env;
-    galera::Certification cert(env.conf(), 0);
+    TestEnv env("cert", enc);
 
-    cert.assign_initial_position(gu::GTID(), version);
-    galera::TrxHandleMaster::Params const trx_params(
-        "", version, galera::KeySet::MAX_VERSION);
+    {   // At least with GCC 5.4.0-6ubuntu1~16.04.10 another scope is needed
+        // to guarantee cert object destruction before env destruction.
+        galera::Certification cert(env.conf(), env.gcache(), 0);
 
-    mark_point();
+        cert.assign_initial_position(gu::GTID(), version);
+        galera::TrxHandleMaster::Params const trx_params(
+            "", version, galera::KeySet::MAX_VERSION);
 
-    for (size_t i(0); i < nws; ++i)
-    {
-        log_info << "%%%%%%%% Processing WS: " << i << " ver: " << version
-                 << " l: " << wsi[i].local_seqno
-                 << " g: " << wsi[i].global_seqno
-                 << " s: " << wsi[i].last_seen_seqno
-                 << " leaf: " << (wsi[i].shared ?
-                                  WSREP_KEY_REFERENCE : WSREP_KEY_EXCLUSIVE)
-                 << " base: " << wsi[i].zero_level;
-        galera::TrxHandleMasterPtr trx(galera::TrxHandleMaster::New(
-                                           mp,
-                                           trx_params,
-                                           wsi[i].uuid,
-                                           wsi[i].conn_id,
-                                           wsi[i].trx_id),
-                                       galera::TrxHandleMasterDeleter());
-        trx->set_flags(wsi[i].flags);
-        trx->append_key(
-            galera::KeyData(version,
-                            wsi[i].key,
-                            wsi[i].iov_len,
-                            (wsi[i].shared ? galera::KeyData::BRANCH_KEY_TYPE :
-                             WSREP_KEY_EXCLUSIVE),
-                            true));
+        mark_point();
 
-        if (version >= 6) // version from which zero-level keys were introduced
+        for (size_t i(0); i < nws; ++i)
         {
-            if (galera::KeyData::BRANCH_KEY_TYPE != wsi[i].zero_level)
+            log_info << "%%%%%%%% Processing WS: " << i << " ver: " << version
+                     << " l: " << wsi[i].local_seqno
+                     << " g: " << wsi[i].global_seqno
+                     << " s: " << wsi[i].last_seen_seqno
+                     << " leaf: " << (wsi[i].shared ?
+                                      WSREP_KEY_REFERENCE : WSREP_KEY_EXCLUSIVE)
+                     << " base: " << wsi[i].zero_level;
+
+            galera::TrxHandleMasterPtr trx(galera::TrxHandleMaster::New(
+                                               mp,
+                                               trx_params,
+                                               wsi[i].uuid,
+                                               wsi[i].conn_id,
+                                               wsi[i].trx_id),
+                                           galera::TrxHandleMasterDeleter());
+            trx->set_flags(wsi[i].flags);
+            trx->append_key(
+                galera::KeyData(version,
+                                wsi[i].key,
+                                wsi[i].iov_len,
+                                (wsi[i].shared ? galera::KeyData::BRANCH_KEY_TYPE :
+                                 WSREP_KEY_EXCLUSIVE),
+                                true));
+
+            if (version >= 6) // version from which zero-level keys were introduced
             {
-                trx->append_key(galera::KeyData(version, wsi[i].zero_level));
+                if (galera::KeyData::BRANCH_KEY_TYPE != wsi[i].zero_level)
+                {
+                    trx->append_key(galera::KeyData(version, wsi[i].zero_level));
+                }
+
+                // this is always added last in ReplicatorSMM::replicate()
+                trx->append_key(galera::KeyData(version));
             }
 
-            // this is always called last in ReplicatorSMM::replicate()
-            trx->append_key(galera::KeyData(version));
-        }
+            if (wsi[i].data_len)
+            {
+                trx->append_data(wsi[i].data_ptr, wsi[i].data_len,
+                                 WSREP_DATA_ORDERED, false);
+            }
 
-        if (wsi[i].data_len)
-        {
-            trx->append_data(wsi[i].data_ptr, wsi[i].data_len,
-                             WSREP_DATA_ORDERED, false);
-        }
+            galera::WriteSetNG::GatherVector out;
+            size_t size(trx->write_set_out().gather(trx->source_id(),
+                                                    trx->conn_id(),
+                                                    trx->trx_id(),
+                                                    out));
+            trx->finalize(wsi[i].last_seen_seqno);
 
-        galera::WriteSetNG::GatherVector out;
-        size_t size(trx->write_set_out().gather(trx->source_id(),
-                                                trx->conn_id(),
-                                                trx->trx_id(),
-                                                out));
-        trx->finalize(wsi[i].last_seen_seqno);
+            // serialize write set into gcache buffer
+            void* ptx;
+            void* buf(env.gcache().malloc(size, ptx));
+            ck_assert(out.serialize(ptx, size) == size);
+            env.gcache().drop_plaintext(buf); // like before the slave queue
 
-        // serialize write set into gcache buffer
-        gu::byte_t* buf(static_cast<gu::byte_t*>(env.gcache().malloc(size)));
-        ck_assert(out.serialize(buf, size) == size);
+            gcs_action act = {wsi[i].global_seqno,
+                              wsi[i].local_seqno,
+                              buf,
+                              static_cast<int32_t>(size),
+                              GCS_ACT_WRITESET};
+            galera::TrxHandleSlavePtr ts(galera::TrxHandleSlave::New(false, sp),
+                                         galera::TrxHandleSlaveDeleter());
+            /* even though ptx was not flushed to buf yet, unserialize() should
+             * pick it from gcache */
+            ck_assert(ts->unserialize<true>(env.gcache(), act) == size);
 
+            galera::Certification::TestResult result(cert.append_trx(ts));
+            ck_assert_msg(result == wsi[i].result,
+                          "g: %" PRId64 " res: %d exp: %d, version: %d",
+                          ts->global_seqno(), result, wsi[i].result, version);
+            ck_assert_msg(ts->depends_seqno() == wsi[i].expected_depends_seqno,
+                          "wsi: %zu g: %" PRId64 " ld: %" PRId64 " eld: %" PRId64
+                          ", version: %d",
+                          i, ts->global_seqno(), ts->depends_seqno(),
+                          wsi[i].expected_depends_seqno, version);
+            cert.set_trx_committed(*ts);
+            mark_point();
 
-        gcs_action act = {wsi[i].global_seqno,
-                          wsi[i].local_seqno,
-                          buf,
-                          static_cast<int32_t>(size),
-                          GCS_ACT_WRITESET};
-        galera::TrxHandleSlavePtr ts(galera::TrxHandleSlave::New(false, sp),
-                                     galera::TrxHandleSlaveDeleter());
-        ck_assert(ts->unserialize<true>(act) == size);
+            // so that the buffer can be released later
+            env.gcache().seqno_assign(buf, ts->global_seqno(), GCS_ACT_WRITESET,
+                                      false);
+            mark_point();
 
-        galera::Certification::TestResult result(cert.append_trx(ts));
-        ck_assert_msg(result == wsi[i].result,
-                      "g: %" PRId64 " res: %d exp: %d, version: %d",
-                      ts->global_seqno(), result, wsi[i].result, version);
-        ck_assert_msg(ts->depends_seqno() == wsi[i].expected_depends_seqno,
-                      "wsi: %zu g: %" PRId64 " ld: %" PRId64 " eld: %" PRId64
-                      ", version: %d",
-                      i, ts->global_seqno(), ts->depends_seqno(),
-                      wsi[i].expected_depends_seqno, version);
-        cert.set_trx_committed(*ts);
-
-        if (ts->nbo_end() && ts->ends_nbo() != WSREP_SEQNO_UNDEFINED)
-        {
-            cert.erase_nbo_ctx(ts->ends_nbo());
+            if (ts->nbo_end() && ts->ends_nbo() != WSREP_SEQNO_UNDEFINED)
+            {
+                cert.erase_nbo_ctx(ts->ends_nbo());
+            }
+            mark_point();
         }
     }
+    mark_point();
+    // gcache cleanup like what would result after purge_trxs_upto()
+    env.gcache().seqno_release(wsi[nws - 1].global_seqno);
 }
 
-START_TEST(test_certification_trx_v4)
+static void
+certification_trx_v4(bool const enc)
 {
     const int version(4);
     using galera::Certification;
@@ -274,12 +256,24 @@ START_TEST(test_certification_trx_v4)
 
     size_t nws(sizeof(wsi)/sizeof(wsi[0]));
 
-    run_wsinfo(wsi, nws, version);
+    run_wsinfo(wsi, nws, version, enc);
+}
 
+START_TEST(test_certification_trx_v4)
+{
+    certification_trx_v4(false);
 }
 END_TEST
 
-START_TEST(test_certification_trx_different_level_v4)
+START_TEST(test_certification_trx_v4E)
+{
+    certification_trx_v4(true);
+}
+END_TEST
+
+
+static void
+certification_trx_different_level_v3(bool const enc)
 {
     const int version(4);
     using galera::Certification;
@@ -318,13 +312,25 @@ START_TEST(test_certification_trx_different_level_v4)
 
     size_t nws(sizeof(wsi)/sizeof(wsi[0]));
 
-    run_wsinfo(wsi, nws, version);
+    run_wsinfo(wsi, nws, version, enc);
+}
+
+START_TEST(test_certification_trx_different_level_v3)
+{
+    certification_trx_different_level_v3(false);
 }
 END_TEST
 
-START_TEST(test_certification_toi_v3)
+START_TEST(test_certification_trx_different_level_v3E)
 {
+    certification_trx_different_level_v3(true);
+}
+END_TEST
 
+
+static void
+certification_toi_v3(bool const enc)
+{
     const int version(3);
     using galera::Certification;
     using galera::TrxHandle;
@@ -385,13 +391,24 @@ START_TEST(test_certification_toi_v3)
 
     size_t nws(sizeof(wsi)/sizeof(wsi[0]));
 
-    run_wsinfo(wsi, nws, version);
+    run_wsinfo(wsi, nws, version, enc);
+}
 
+START_TEST(test_certification_toi_v3)
+{
+    certification_toi_v3(false);
+}
+END_TEST
+
+START_TEST(test_certification_toi_v3E)
+{
+    certification_toi_v3(true);
 }
 END_TEST
 
 
-START_TEST(test_certification_nbo)
+static void
+certification_nbo(bool const enc)
 {
     log_info << "START: test_certification_nbo";
     const int version(galera::WriteSetNG::VER5);
@@ -468,16 +485,28 @@ START_TEST(test_certification_nbo)
 
     size_t nws(sizeof(wsi)/sizeof(wsi[0]));
 
-    run_wsinfo(wsi, nws, version);
+    run_wsinfo(wsi, nws, version, enc);
 
     log_info << "END: test_certification_nbo";
+}
+
+START_TEST(test_certification_nbo)
+{
+    certification_nbo(false);
+}
+END_TEST
+
+START_TEST(test_certification_nboE)
+{
+    certification_nbo(true);
 }
 END_TEST
 
 
-START_TEST(test_certification_commit_fragment)
+static void
+certification_commit_fragment(bool const enc)
 {
-    const int version(4);
+    const int version(galera::WriteSetNG::VER5);
     using galera::Certification;
     using galera::TrxHandle;
     using galera::void_cast;
@@ -523,11 +552,22 @@ START_TEST(test_certification_commit_fragment)
 
     size_t nws(sizeof(wsi)/sizeof(wsi[0]));
 
-    run_wsinfo(wsi, nws, version);
+    run_wsinfo(wsi, nws, version, enc);
+}
+
+START_TEST(test_certification_commit_fragment)
+{
+    certification_commit_fragment(false);
 }
 END_TEST
 
-START_TEST(test_certification_zero_level)
+START_TEST(test_certification_commit_fragmentE)
+{
+    certification_commit_fragment(true);
+}
+END_TEST
+
+static void certification_zero_level(bool const enc)
 {
 
     const int version(6);
@@ -621,8 +661,19 @@ START_TEST(test_certification_zero_level)
 
     size_t nws(sizeof(wsi)/sizeof(wsi[0]));
 
-    run_wsinfo(wsi, nws, version);
+    run_wsinfo(wsi, nws, version, enc);
 
+}
+
+START_TEST(test_certification_zero_level)
+{
+    certification_zero_level(false);
+}
+END_TEST
+
+START_TEST(test_certification_zero_levelE)
+{
+    certification_zero_level(true);
 }
 END_TEST
 
@@ -649,7 +700,7 @@ struct CertFixture
     galera::ProgressCallback<int64_t> gcache_pcb{WSREP_MEMBER_UNDEFINED,
         WSREP_MEMBER_UNDEFINED};
     gcache::GCache gcache{&gcache_pcb, conf, "."};
-    galera::Certification cert{conf, 0};
+    galera::Certification cert{conf, gcache, 0};
     int version = galera::WriteSetNG::MAX_VERSION;
     CertFixture() {
         cert.assign_initial_position(gu::GTID(), version);
@@ -693,14 +744,16 @@ struct CertFixture
         size_t size = txm->write_set_out().gather(
             txm->source_id(), txm->conn_id(), txm->trx_id(), out);
         txm->finalize(last_seen);
-        gu::byte_t* buf = static_cast<gu::byte_t*>(gcache.malloc(size));
-        ck_assert(out.serialize(buf, size) == size);
+        void* ptx;
+        gu::byte_t* buf = static_cast<gu::byte_t*>(gcache.malloc(size, ptx));
+        ck_assert(out.serialize(ptx, size) == size);
+        gcache.drop_plaintext(buf);
         ++cur_seqno;
         gcs_action act = { cur_seqno, cur_seqno, buf,
                            static_cast<int32_t>(size), GCS_ACT_WRITESET };
         galera::TrxHandleSlavePtr ts(galera::TrxHandleSlave::New(false, sp),
                                      galera::TrxHandleSlaveDeleter{});
-        ck_assert(ts->unserialize<true>(act) == size);
+        ck_assert(ts->unserialize<true>(gcache, act) == size);
         auto result = cert.append_trx(ts);
         /* Mark committed here to avoid doing it in every test case. If the
          * ts is not marked as committed, the certification destructor will
@@ -1490,26 +1543,32 @@ Suite* certification_suite()
 
     t = tcase_create("certification_trx_v4");
     tcase_add_test(t, test_certification_trx_v4);
+    tcase_add_test(t, test_certification_trx_v4E);
+    suite_add_tcase(s, t);
+
+    t = tcase_create("certification_trx_different_level_v3");
+    tcase_add_test(t, test_certification_trx_different_level_v3);
+    tcase_add_test(t, test_certification_trx_different_level_v3E);
     suite_add_tcase(s, t);
 
     t = tcase_create("certification_toi_v3");
     tcase_add_test(t, test_certification_toi_v3);
-    suite_add_tcase(s, t);
-
-    t = tcase_create("certification_trx_different_level_v4");
-    tcase_add_test(t, test_certification_trx_different_level_v4);
+    tcase_add_test(t, test_certification_toi_v3E);
     suite_add_tcase(s, t);
 
     t = tcase_create("certification_nbo");
     tcase_add_test(t, test_certification_nbo);
+    tcase_add_test(t, test_certification_nboE);
     suite_add_tcase(s, t);
 
     t = tcase_create("certification_commit_fragment");
     tcase_add_test(t, test_certification_commit_fragment);
+    tcase_add_test(t, test_certification_commit_fragmentE);
     suite_add_tcase(s, t);
 
     t = tcase_create("certification_zero_level");
     tcase_add_test(t, test_certification_zero_level);
+    tcase_add_test(t, test_certification_zero_levelE);
     suite_add_tcase(s, t);
 
     t = tcase_create("certification_rules");

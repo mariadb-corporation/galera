@@ -30,6 +30,7 @@ namespace galera
                 return static_cast<Version>(ver);
 
             gu_throw_error (EINVAL) << "Unrecognized DataSet version: " << ver;
+            return static_cast<Version>(ver); // Silence compiler
         }
 
         /*! Dummy class to instantiate DataSetOut */

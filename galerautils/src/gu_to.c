@@ -99,13 +99,13 @@ gu_to_t *gu_to_create (int len, gu_seqno_t seqno)
             for (i = 0; i < ret->qlen; i++) {
                 to_waiter_t *w = ret->queue + i;
 #ifdef TO_USE_SIGNAL
-                gu_cond_init (&w->cond, NULL);
+                gu_cond_init (NULL, &w->cond);
 #else
                 pthread_mutex_init (&w->mtx, NULL);
 #endif
                 w->state       = RELEASED;
             }
-            gu_mutex_init (&ret->lock, NULL);
+            gu_mutex_init (NULL, &ret->lock);
         
             return ret;
         }

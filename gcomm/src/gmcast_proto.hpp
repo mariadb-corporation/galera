@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2009-2019 Codership Oy <info@codership.com>
+ * Copyright (C) 2009-2024 Codership Oy <info@codership.com>
  */
 
 #ifndef GCOMM_GMCAST_PROTO_HPP

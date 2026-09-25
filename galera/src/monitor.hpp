@@ -8,7 +8,9 @@
 #include "trx_handle.hpp"
 #include <gu_lock.hpp> // for gu::Mutex and gu::Cond
 #include <gu_limits.h>
+#include "gu_thread_keys.hpp"
 
+#include <memory>
 #include <vector>
 
 namespace galera
@@ -20,15 +22,19 @@ namespace galera
 
         struct Process
         {
-            Process() : obj_(0), cond_(), wait_cond_(), state_(S_IDLE)
+            Process()
+                : obj_(0)
+                , cond_()
+                , wait_cond_()
+                , state_(S_IDLE)
 #ifndef NDEBUG
-                      ,dobj_()
+                , dobj_()
 #endif /* NDEBUG */
             { }
 
             const C* obj_;
-            gu::Cond cond_;
-            gu::Cond wait_cond_;
+            gu::Cond* cond_;
+            std::shared_ptr<gu::Cond> wait_cond_;
             enum State
             {
                 S_IDLE,     // Slot is free
@@ -41,6 +47,29 @@ namespace galera
             C dobj_;
 #endif /* NDEBUG */
 
+
+            std::shared_ptr<gu::Cond> wait_cond(
+                gu::Lock& lock __attribute__((unused)),
+                gu::CondKey cond_key)
+            {
+                assert(lock.owns_lock());
+                if (not wait_cond_)
+                {
+                    wait_cond_ = std::make_shared<gu::Cond>(
+                        gu::get_cond_key(cond_key));
+                }
+                return wait_cond_;
+            }
+
+            void wake_up_waiters(gu::Lock& lock __attribute__((unused)))
+            {
+                assert(lock.owns_lock());
+                if (wait_cond_)
+                {
+                    wait_cond_->broadcast();
+                    wait_cond_.reset();
+                }
+            }
         private:
 
             // non-copyable
@@ -52,10 +81,11 @@ namespace galera
         static const size_t  process_mask_ = process_size_ - 1;
     public:
 
-        Monitor()
+        Monitor(enum gu::MutexKey mutex_key, enum gu::CondKey cond_key)
             :
-            mutex_(),
-            cond_(),
+            mutex_(gu::get_mutex_key(mutex_key)),
+            cond_key_(cond_key),
+            cond_(gu::get_cond_key(cond_key)),
             uuid_(WSREP_UUID_UNDEFINED),
             last_entered_(-1),
             last_left_(-1),
@@ -128,7 +158,7 @@ namespace galera
             if (seqno != -1)
             {
                 const size_t idx(indexof(seqno));
-                process_[idx].wait_cond_.broadcast();
+                process_[idx].wake_up_waiters(lock);
             }
         }
 
@@ -159,8 +189,10 @@ namespace galera
                 while (may_enter(obj) == false &&
                        process_[idx].state_ == Process::S_WAITING)
                 {
+                    process_[idx].cond_ = obj.cond();
                     ++waits_;
-                    lock.wait(process_[idx].cond_);
+                    lock.wait(*process_[idx].cond_);
+                    process_[idx].cond_ = 0;
                 }
 
                 if (process_[idx].state_ != Process::S_CANCELED)
@@ -276,7 +308,10 @@ namespace galera
                 process_[idx].state_ == Process::S_WAITING )
             {
                 process_[idx].state_ = Process::S_CANCELED;
-                process_[idx].cond_.signal();
+                if (process_[idx].cond_)
+                {
+                    process_[idx].cond_->signal();
+                }
                 // since last_left + 1 cannot be <= S_WAITING we're not
                 // modifying a window here. No broadcasting.
                 return true;
@@ -333,7 +368,7 @@ namespace galera
             drain_common(seqno, lock);
 
             // there can be some stale canceled entries
-            update_last_left();
+            update_last_left(lock);
 
             drain_seqno_ = GU_LLONG_MAX;
             cond_.broadcast();
@@ -345,7 +380,8 @@ namespace galera
             while (last_left_ < seqno)
             {
                 size_t idx(indexof(seqno));
-                lock.wait(process_[idx].wait_cond_);
+                auto cond(process_[idx].wait_cond(lock, cond_key_));;
+                lock.wait(*cond);
             }
         }
 
@@ -359,7 +395,8 @@ namespace galera
             while (last_left_ < gtid.seqno())
             {
                 size_t idx(indexof(gtid.seqno()));
-                lock.wait(process_[idx].wait_cond_, wait_until);
+                auto cond(process_[idx].wait_cond(lock, cond_key_));;
+                lock.wait(*cond, wait_until);
             }
         }
 
@@ -425,7 +462,7 @@ namespace galera
             if (last_entered_ < obj_seqno) last_entered_ = obj_seqno;
         }
 
-        void update_last_left()
+        void update_last_left(gu::Lock& lock)
         {
             for (wsrep_seqno_t i = last_left_ + 1; i <= last_entered_; ++i)
             {
@@ -435,7 +472,7 @@ namespace galera
                 {
                     a.state_   = Process::S_IDLE;
                     last_left_ = i;
-                    a.wait_cond_.broadcast();
+                    a.wake_up_waiters(lock);
                 }
                 else
                 {
@@ -459,7 +496,10 @@ namespace galera
                     // there will be  nobody to clean up and advance
                     // last_left_.
                     a.state_ = Process::S_APPLYING;
-                    a.cond_.signal();
+                    if (a.cond_)
+                    {
+                        a.cond_->signal();
+                    }
                 }
             }
         }
@@ -472,9 +512,9 @@ namespace galera
             {
                 process_[idx].state_ = Process::S_IDLE;
                 last_left_           = obj_seqno;
-                process_[idx].wait_cond_.broadcast();
+                process_[idx].wake_up_waiters(lock);
 
-                update_last_left();
+                update_last_left(lock);
                 oool_ += (last_left_ > obj_seqno);
                 // wake up waiters that may remain above us (last_left_
                 // now is max)
@@ -541,6 +581,7 @@ namespace galera
 
         mutable
         gu::Mutex mutex_;
+        gu::CondKey cond_key_;
         gu::Cond  cond_;
         wsrep_uuid_t  uuid_;
         wsrep_seqno_t last_entered_;

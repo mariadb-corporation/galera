@@ -395,8 +395,10 @@ gcs_sm_enter (gcs_sm_t* sm, gu_cond_t* cond, bool scheduled, bool block)
         gu_mutex_unlock (&sm->lock);
     }
     else if (ret != -EBADFD){
+        union { gu_thread_t thr; long val; } tmp;
+        tmp.thr = gu_thread_self();
         gu_warn("thread %ld failed to schedule for monitor: %ld (%s)",
-                gu_thread_self(), ret, strerror(-ret));
+                tmp.val, ret, strerror(-ret));
     }
 
     return ret;

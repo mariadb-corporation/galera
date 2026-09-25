@@ -38,6 +38,12 @@ static void set_fd_options(S& socket)
     long flags(FD_CLOEXEC);
     if (fcntl(native_socket_handle(socket), F_SETFD, flags) == -1)
     {
+        // The socket may have been closed concurrently. Throwing here would
+        // escape the completion handler as a gu::Exception and take the gcomm
+        // backend down; let the operation which follows report the failure.
+        if (not socket.is_open()) return;
+        
+        if (errno == EBADF) return; // closed under us
         gu_throw_system_error(errno) << "failed to set FD_CLOEXEC";
     }
 }
@@ -113,18 +119,25 @@ static size_t get_send_buffer_size(Socket& socket)
     }
 }
 
-static inline asio::ip::tcp::resolver::iterator resolve_tcp(
-    asio::io_service& io_service,
+static inline asio::ip::tcp::endpoint resolve_tcp(
+    asio::io_context& io_service,
     const gu::URI& uri)
 {
     asio::ip::tcp::resolver resolver(io_service);
-    // Give query flags explicitly to avoid having AI_ADDRCONFIG in
-    // underlying getaddrinfo() hint flags.
+    // Give resolver flags explicitly to avoid having AI_ADDRCONFIG in
+    // underlying getaddrinfo() hint flags. resolve() throws on failure,
+    // so on success the result always has at least one entry.
+#if ASIO_VERSION < 103300
     asio::ip::tcp::resolver::query
         query(gu::unescape_addr(uri.get_host()),
               uri.get_port(),
               asio::ip::tcp::resolver::query::flags(0));
-    return resolver.resolve(query);
+    return resolver.resolve(query)->endpoint();
+#else
+    return resolver.resolve(gu::unescape_addr(uri.get_host()),
+                            uri.get_port(),
+                            asio::ip::tcp::resolver::flags(0)).begin()->endpoint();
+#endif /* ASIO_VERSION < 103300 */
 }
 
 template <class Socket>

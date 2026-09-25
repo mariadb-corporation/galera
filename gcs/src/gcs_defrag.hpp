@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2008 Codership Oy <info@codership.com>
+ * Copyright (C) 2008-2019 Codership Oy <info@codership.com>
  *
  * $Id$
  */
@@ -23,7 +23,8 @@ typedef struct gcs_defrag
 {
     gcache_t*      cache;
     gcs_seqno_t    sent_id; // sent id (unique for a node)
-    uint8_t*       head;    // head of action buffer
+    void*          head;    // head of action buffer
+    void*          plain;   // plaintext buffer
     uint8_t*       tail;    // tail of action data
     size_t         size;
     size_t         received;
@@ -35,6 +36,7 @@ gcs_defrag_t;
 static inline void
 gcs_defrag_init (gcs_defrag_t* df, gcache_t* cache)
 {
+    if (df)
     memset (df, 0, sizeof (*df));
     df->cache   = cache;
     df->sent_id = GCS_SEQNO_ILL;

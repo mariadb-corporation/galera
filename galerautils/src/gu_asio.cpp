@@ -1,5 +1,5 @@
 //
-// Copyright (C) 2014-2020 Codership Oy <info@codership.com>
+// Copyright (C) 2014-2025 Codership Oy <info@codership.com>
 //
 
 #include "gu_config.hpp"
@@ -49,7 +49,11 @@
 #include <fstream>
 #include <mutex>
 
+static wsrep_tls_service_v1_t* gu_tls_service(0);
+
 static wsrep_allowlist_service_v1_t* gu_allowlist_service(0);
+
+static wsrep_connection_monitor_service_v1_t* gu_connection_monitor_service(0);
 
 //
 // AsioIpAddress wrapper
@@ -209,17 +213,26 @@ gu::AsioErrorCode::AsioErrorCode()
     : value_()
     , category_(&gu_asio_system_category)
     , error_extra_()
+    , wsrep_category_()
+    , tls_stream_()
 { }
 
 gu::AsioErrorCode::AsioErrorCode(int err)
     : value_(err)
     , category_(&gu_asio_system_category)
     , error_extra_()
+    , wsrep_category_()
+    , tls_stream_()
 { }
 
 std::string gu::AsioErrorCode::message() const
 {
-    if (category_)
+    if (wsrep_category_ && gu_tls_service)
+    {
+        return gu_tls_service->error_message_get(
+            gu_tls_service->context, tls_stream_, value_, wsrep_category_);
+    }
+    else if (category_)
     {
         std::string ret(
             asio::error_code(value_, category_->native()).message());
@@ -469,7 +482,8 @@ static void ssl_prepare_context(const gu::Config& conf, asio::ssl::context& ctx,
                 log_info << "SSL cipher list set to '" << value << '\'';
             }
         }
-        ctx.set_options(asio::ssl::context::no_sslv2 |
+        ctx.set_options(asio::ssl::context::no_compression |
+                        asio::ssl::context::no_sslv2 |
                         asio::ssl::context::no_sslv3 |
                         asio::ssl::context::no_tlsv1);
     }
@@ -609,22 +623,6 @@ void gu::ssl_init_options(gu::Config& conf)
         const std::string cipher_list(conf.get(conf::ssl_cipher, ""));
         conf.set(conf::ssl_cipher, cipher_list);
 
-        // compression
-        try
-        {
-            (void) conf.get(conf::ssl_compression);
-            // warn the user if socket.ssl_compression is set explicitly
-            log_warn << "SSL compression is not effective. The option "
-                     << conf::ssl_compression << " is deprecated and "
-                     << "will be removed in future releases.";
-        }
-        catch (NotSet&)
-        {
-            // this is a desirable situation
-        }
-        log_info << "not using SSL compression";
-        sk_SSL_COMP_zero(SSL_COMP_get_compression_methods());
-
         // verify that asio::ssl::context can be initialized with provided
         // values
         try
@@ -685,6 +683,7 @@ bool gu::is_verbose_error(const gu::AsioErrorCode& ec)
 gu::AsioIoService::AsioIoService(const gu::Config& conf)
     : impl_(std::unique_ptr<Impl>(new Impl))
     , conf_(conf)
+    , tls_service_(gu_tls_service)
     , signal_connection_()
     , dynamic_socket_(false)
 {
@@ -760,7 +759,11 @@ size_t gu::AsioIoService::run()
 
 void gu::AsioIoService::post(std::function<void()> fun)
 {
+#if ASIO_VERSION < 103300
     impl_->native().post(fun);
+#else
+    asio::post(impl_->native(), fun);
+#endif /* ASIO_VERSION < 103300 */
 }
 
 void gu::AsioIoService::stop()
@@ -770,7 +773,11 @@ void gu::AsioIoService::stop()
 
 void gu::AsioIoService::reset()
 {
+#if ASIO_VERSION < 103300
     impl_->native().reset();
+#else
+    impl_->native().restart();
+#endif /* ASIO_VERSION < 103300 */
 }
 
 gu::AsioIoService::Impl& gu::AsioIoService::impl()
@@ -815,7 +822,7 @@ public:
     typedef asio::steady_timer native_timer_type;
 #endif /* #if (__GNUC__ == 4 && __GNUC_MINOR__ == 4) */
 
-    Impl(asio::io_service& io_service) : timer_(io_service) { }
+    Impl(AsioIoService::Impl::native_type& io_service) : timer_(io_service) { }
     native_timer_type& native() { return timer_; }
     void handle_wait(const std::shared_ptr<AsioSteadyTimerHandler>& handler,
                      const asio::error_code& ec)
@@ -852,20 +859,52 @@ gu::AsioSteadyTimer::~AsioSteadyTimer()
 void gu::AsioSteadyTimer::expires_from_now(
     const AsioClock::duration& duration)
 {
+#if ASIO_VERSION < 103300
     impl_->native().expires_from_now(to_native_duration(duration));
+#else
+    impl_->native().expires_after(to_native_duration(duration));
+#endif /* ASIO_VERSION < 103300 */
 }
 
 void gu::AsioSteadyTimer::async_wait(
     const std::shared_ptr<AsioSteadyTimerHandler>& handler)
 {
-    impl_->native().async_wait(boost::bind(&Impl::handle_wait,
-                                           impl_.get(), handler,
-                                           asio::placeholders::error));
+    impl_->native().async_wait([this, handler](const asio::error_code& ec) {
+        impl_->handle_wait(handler, ec);
+    });
 }
 
 void gu::AsioSteadyTimer::cancel()
 {
     impl_->native().cancel();
+}
+
+//
+// TLS service hooks.
+//
+
+static std::mutex gu_tls_service_init_mutex;
+static size_t gu_tls_service_usage;
+
+int gu::init_tls_service_v1(wsrep_tls_service_v1_t* tls_service)
+{
+    std::lock_guard<std::mutex> lock(gu_tls_service_init_mutex);
+    ++gu_tls_service_usage;
+    if (gu_tls_service)
+    {
+        assert(gu_tls_service == tls_service);
+        return 0;
+    }
+    gu_tls_service = tls_service;
+    return 0;
+}
+
+void gu::deinit_tls_service_v1()
+{
+    std::lock_guard<std::mutex> lock(gu_tls_service_init_mutex);
+    assert(gu_tls_service_usage > 0);
+    --gu_tls_service_usage;
+    if (gu_tls_service_usage == 0) gu_tls_service = 0;
 }
 
 //
@@ -920,3 +959,97 @@ void gu::deinit_allowlist_service_v1()
 std::atomic<enum wsrep_node_isolation_mode> gu::gu_asio_node_isolation_mode{
     WSREP_NODE_ISOLATION_NOT_ISOLATED
 };
+
+//
+// ConnectionMonitor
+//
+
+static std::mutex gu_connection_monitor_service_init_mutex;
+static size_t gu_connection_monitor_service_usage;
+
+int gu::init_connection_monitor_service_v1(wsrep_connection_monitor_service_v1_t* connection_monitor)
+{
+    log_info << "init_connection_monitor_service_v1";
+    std::lock_guard<std::mutex> lock(gu_connection_monitor_service_init_mutex);
+    ++gu_connection_monitor_service_usage;
+    if (gu_connection_monitor_service)
+    {
+        assert(gu_connection_monitor_service == connection_monitor);
+        return 0;
+    }
+    gu_connection_monitor_service = connection_monitor;
+    return 0;
+}
+
+void gu::deinit_connection_monitor_service_v1()
+{
+    log_info << "deinit_connection_monitor_service_v1";
+    std::lock_guard<std::mutex> lock(gu_connection_monitor_service_init_mutex);
+    assert(gu_connection_monitor_service_usage > 0);
+    --gu_connection_monitor_service_usage;
+    if (gu_connection_monitor_service_usage == 0)
+        gu_connection_monitor_service = 0;
+}
+
+void gu::connection_monitor_connect(wsrep_connection_key_t id,
+                                    const std::string& scheme,
+                                    const std::string& local_addr,
+                                    const std::string& remote_addr)
+{
+    if (gu_connection_monitor_service == nullptr)
+    {
+        return; // No action
+    }
+
+    // tcp://127.0.0.1:19006 --> 127.0.0.1:19006
+    std::string ra = remote_addr.substr(6, remote_addr.length());
+    std::string la = local_addr.substr(6, local_addr.length());
+
+    wsrep_buf_t const lscheme = {scheme.c_str(), scheme.length() };
+    wsrep_buf_t const laddr   = {la.c_str(), la.length() };
+    wsrep_buf_t const raddr   = {ra.c_str(), ra.length() };
+
+    gu_connection_monitor_service->connection_monitor_connect_cb(
+        gu_connection_monitor_service->context,
+        id,
+        &lscheme,
+        &laddr,
+        &raddr);
+}
+
+void gu::connection_monitor_disconnect(wsrep_connection_key_t id)
+{
+    if (gu_connection_monitor_service == nullptr)
+    {
+        return; // No action
+    }
+
+    gu_connection_monitor_service->connection_monitor_disconnect_cb(
+        gu_connection_monitor_service->context,
+        id);
+}
+
+void gu::connection_monitor_ssl_info(wsrep_connection_key_t id,
+                                     const std::string& cipher,
+                                     const std::string& issuer,
+                                     const std::string& subject,
+                                     const std::string& version)
+{
+    if (gu_connection_monitor_service == nullptr)
+    {
+        return; // No action
+    }
+
+    wsrep_buf_t const ch = {cipher.c_str(), cipher.length() };
+    wsrep_buf_t const iss = {issuer.c_str(), issuer.length() };
+    wsrep_buf_t const sub = {subject.c_str(), subject.length() };
+    wsrep_buf_t const vers = {version.c_str(), version.length() };
+
+    gu_connection_monitor_service->connection_monitor_ssl_info_cb(
+        gu_connection_monitor_service->context,
+        id,
+        &ch,
+        &iss,
+        &sub,
+        &vers);
+}

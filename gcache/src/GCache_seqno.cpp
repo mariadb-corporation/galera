@@ -59,11 +59,21 @@ namespace gcache
     {
         gu::Lock lock(mtx);
 
-        BufferHeader* bh = ptr2BH(ptr);
+        BufferHeader* bh = get_BH(ptr, true);
 
         assert (SEQNO_NONE == bh->seqno_g);
         assert (seqno_g > 0);
         assert (!BH_is_released(bh));
+
+#ifndef NDEBUG
+        seqno_t const off(seqno_g - seqno_max);
+        if (off != 1 && params.debug())
+        {
+            log_info << "GCache::seqno_assign(seqno: " << seqno_g
+                     << ", type: " << int(type) << ", skip: "
+                     << (skip ? "yes)" : "no)") << " with offset " << off;
+        }
+#endif
 
         if (gu_likely(seqno_g > seqno_max))
         {
@@ -79,7 +89,7 @@ namespace gcache
 
                 if (!seqno2ptr_t::not_set(prev_ptr))
                 {
-                    const BufferHeader* const prev_bh(ptr2BH(prev_ptr));
+                    const BufferHeader* const prev_bh(get_BH(prev_ptr));
                     assert(0);
                     gu_throw_fatal << "Attempt to reuse the same seqno: "
                                    << seqno_g <<". New buffer: " << bh
@@ -108,7 +118,7 @@ namespace gcache
     {
         gu::Lock lock(mtx);
 
-        BufferHeader* const bh(ptr2BH(ptr));
+        BufferHeader* const bh = get_BH(ptr, true);
         seqno2ptr_iter_t p = seqno2ptr.find(seqno_g);
 
         /* sanity checks */
@@ -225,7 +235,8 @@ namespace gcache
             while((loop = (idx < seqno2ptr.index_end())) && idx <= end)
             {
                 assert(idx != SEQNO_NONE);
-                BufferHeader* const bh(ptr2BH(seqno2ptr[idx]));
+                const void* const ptr(seqno2ptr[idx]);
+                BufferHeader* const bh(get_BH(ptr));
                 assert (bh->seqno_g == idx);
 #ifndef NDEBUG
                 if (!(seqno_released + 1 == idx ||
@@ -240,11 +251,23 @@ namespace gcache
                              << new_gap << "; seqno_max: " << seqno_max;
                     assert(seqno_released + 1 == idx ||
                            seqno_released == SEQNO_NONE);
+                    return;
                 }
 #endif
-                if (gu_likely(!BH_is_released(bh))) free_common(bh);
-                /* free_common() could modify a map, look for next unreleased
-                 * seqno. */
+                if (gu_likely(!BH_is_released(bh)))
+                {
+                    free_common(bh, ptr);
+                }
+                else
+                {
+#ifndef NDEBUG
+                    log_info << "GCache::seqno_release(" << seqno
+                             << "): unexpectedly released buffer: " << bh;
+                    assert(0);
+#endif
+                    seqno_released = idx;
+                }
+
                 idx = seqno2ptr.upper_bound(idx);
             }
 
@@ -341,7 +364,7 @@ namespace gcache
         const void* const ptr(seqno2ptr.at(seqno_g));
         assert (ptr);
 
-        BufferHeader* const bh(ptr2BH(ptr));
+        BufferHeader* const bh(get_BH(ptr));
         assert(seqno_g == bh->seqno_g);
 
         if (BH_is_released(bh)) // repossess and revert the effects of free()
@@ -357,7 +380,7 @@ namespace gcache
             {
             case BUFFER_IN_MEM:  mem.repossess(bh); break;
             case BUFFER_IN_RB:   rb.repossess (bh); break;
-            case BUFFER_IN_PAGE: ps.repossess (bh); break;
+            case BUFFER_IN_PAGE: ps.repossess (bh, ptr); break;
             default: assert(0);
             }
 
@@ -402,7 +425,7 @@ namespace gcache
         // the following may cause IO
         for (size_t i(0); i < found; ++i)
         {
-            const BufferHeader* const bh (ptr2BH(v[i].ptr()));
+            const BufferHeader* const bh(get_BH(v[i].ptr()));
 
             assert (bh->seqno_g == seqno_t(start + i));
             Limits::assert_size(bh->size);

@@ -230,7 +230,6 @@ StateRequest_v1::StateRequest_v1 (const void* str, ssize_t str_len)
 {
     if (sst_offset() + 2*sizeof(uint32_t) > size_t(len_))
     {
-        assert(0);
         gu_throw_error (EINVAL) << "State transfer request is too short: "
                                 << len_ << ", must be at least: "
                                 << (sst_offset() + 2*sizeof(uint32_t));
@@ -238,7 +237,6 @@ StateRequest_v1::StateRequest_v1 (const void* str, ssize_t str_len)
 
     if (strncmp (req_, MAGIC.c_str(), MAGIC.length()))
     {
-        assert(0);
         gu_throw_error (EINVAL) << "Wrong magic signature in state request v1.";
     }
 
@@ -420,7 +418,8 @@ void ReplicatorSMM::process_state_req(void*       recv_ctx,
     assert(seqno_l > -1);
     assert(req != 0);
 
-    StateRequest* const streq(read_state_request(req, req_size));
+    StateRequest* const streq(read_state_request(
+                                  gcache_.get_ro_plaintext(req), req_size));
     // Guess correct STR protocol version. Here we assume that the
     // replicator protocol version didn't change between sending
     // and receiving STR message. Unfortunately the protocol version
@@ -1463,13 +1462,13 @@ void galera::ReplicatorSMM::process_ist_conf_change(const gcs_act_cchange& conf)
     ist_event_queue_.push_back(view_info);
 }
 
-void ReplicatorSMM::ist_cc(const gcs_action& act, bool must_apply,
-                           bool preload)
+void ReplicatorSMM::ist_cc(const gcs_act_cchange& conf,
+                           const gcs_action&      act,
+                           bool const             must_apply,
+                           bool const             preload)
 {
     assert(GCS_ACT_CCHANGE == act.type);
     assert(act.seqno_g > 0);
-
-    gcs_act_cchange const conf(act.buf, act.size);
 
     assert(conf.conf_id >= 0); // Primary configuration
     assert(conf.seqno == act.seqno_g);

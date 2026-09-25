@@ -15,25 +15,28 @@
 
 using namespace gcs_test;
 
-/* Thes test was specifically created to reproduce #465 */
-START_TEST(gcs_memb_test_465)
+/**
+ * Helper to bootstrap 3-node cluster:
+ * 0 - SYNCED
+ * 1 - PRIMARY
+ * 2 - JOINED
+ */
+static void
+bootstrap_3node_cluster(struct gt_group& group,
+                        struct gt_node*  nodes,
+                        bool const enc)
 {
-    struct gt_group group;
     ck_assert(group.nodes_num == 0);
 
-    struct gt_node nodes[GT_MAX_NODES];
-    int i;
-    ssize_t ret = 0;
-
     // initialize individual node structures
-    for (i = 0; i < GT_MAX_NODES; i++) {
+    for (int i = 0; i < GT_MAX_NODES; i++) {
         int const str_len = 32;
         char name_str[str_len];
         char addr_str[str_len];
 
         sprintf(name_str, "node%d", i);
         sprintf(addr_str, "addr%d", i);
-        nodes[i].group.init(name_str, addr_str, 1, 0, 0);
+        nodes[i].group.init(name_str, addr_str, enc, 1, 0, 0);
     }
 
     gcs_node_state_t node_state;
@@ -67,10 +70,33 @@ START_TEST(gcs_memb_test_465)
     group.deliver_join_sync_msg(2, GCS_MSG_SYNC); // joiner can't sync
     ck_assert(group.verify_node_state_across(2, GCS_NODE_STATE_JOINER));
     group.deliver_join_sync_msg(2, GCS_MSG_JOIN); // end of joiner SST
-    group.deliver_join_sync_msg(2, GCS_MSG_SYNC); // joiner synced
 
     ck_assert(group.verify_node_state_across(0, GCS_NODE_STATE_SYNCED));
     ck_assert(group.verify_node_state_across(1, GCS_NODE_STATE_PRIM));
+    ck_assert(group.verify_node_state_across(2, GCS_NODE_STATE_JOINED));
+}
+
+static void
+shutdown_cluster(struct gt_group& group)
+{
+    while (group.nodes_num)
+    {
+        struct gt_node* dropped = group.drop_node(0);
+        ck_assert(NULL != dropped);
+    }
+    ck_assert(0 == group.nodes_num);
+}
+
+/* Thes test was specifically created to reproduce #465 */
+static void
+t465(bool const enc)
+{
+    struct gt_group group;
+    struct gt_node  nodes[GT_MAX_NODES];
+
+    bootstrap_3node_cluster(group, nodes, enc);
+
+    group.deliver_join_sync_msg(2, GCS_MSG_SYNC); // joiner synced
     ck_assert(group.verify_node_state_across(2, GCS_NODE_STATE_SYNCED));
 
     group.sst_start(1, nodes[0].group()->nodes[0].name);
@@ -85,39 +111,195 @@ START_TEST(gcs_memb_test_465)
     ck_assert(group.verify_node_state_across(1, GCS_NODE_STATE_SYNCED));
     struct gcs_act_rcvd rcvd;
     int                 proto_ver = -1;
-    ret = gcs_group_act_conf(group.nodes[1]->group(), &rcvd, &proto_ver);
+    GcsGroup&           group1(group.nodes[1]->group);
+
+    ssize_t ret = gcs_group_act_conf(group1.group(), &rcvd, &proto_ver);
     struct gcs_act* const act(&rcvd.act);
     ck_assert_msg(ret > 0, "gcs_group_act_cnf() retruned %zd (%s)",
                   ret, strerror (-ret));
     ck_assert(ret == act->buf_len);
     ck_assert_msg(proto_ver == 1 /* current version */,
                   "proto_ver = %d", proto_ver);
-    const gcs_act_cchange conf(act->buf, act->buf_len);
+    const gcs_act_cchange conf(group1.gcache()->get_ro_plaintext(act->buf),
+                               act->buf_len);
+    group1.gcache()->free(const_cast<void*>(act->buf));
     int const my_idx(rcvd.id);
     ck_assert(my_idx == 1);
 
     group.deliver_join_sync_msg(0, GCS_MSG_SYNC); // donor synced
     ck_assert(group.verify_node_state_across(0, GCS_NODE_STATE_SYNCED));
 
-    group.nodes[1]->group.gcache()->free(const_cast<void*>(act->buf));
+    shutdown_cluster(group);
+}
 
-    while (group.nodes_num)
-    {
-        struct gt_node* dropped = group.drop_node(0);
-        ck_assert(NULL != dropped);
+START_TEST(gcs_memb_test_465)
+{
+    t465(false);
+}
+END_TEST
+
+START_TEST(gcs_memb_test_465E)
+{
+    t465(true);
+}
+END_TEST
+
+static void
+membership_check_flags(const struct wsrep_membership*,
+                       int,    // member index
+                       bool,   // REP flag present
+                       bool,   // CLA flag present
+                       bool,   // BOOTSTRAP flag present
+                       bool)   // STATELESS flag present
+{}
+
+static void
+membership_check_flags(const struct wsrep_membership_v2* const m,
+                       int  const n,   // member index
+                       bool const r,   // REP flag present
+                       bool const c,   // CLA flag present
+                       bool const b,   // BOOTSTRAP flag present
+                       bool const s)   // STATELESS flag present
+{
+    ck_assert(((m->members[n].flags & WSREP_MEMBER_FLAGS_REP) != 0) == r);
+    ck_assert(((m->members[n].flags & WSREP_MEMBER_FLAGS_CLA) != 0) == c);
+    ck_assert(((m->members[n].flags & WSREP_MEMBER_FLAGS_BOOTSTRAP) != 0) == b);
+    ck_assert(((m->members[n].flags & WSREP_MEMBER_FLAGS_STATELESS) != 0) == s);
+}
+
+template <typename M>
+static void
+membership_service_test(bool const enc)
+{
+    struct gt_group group;
+    struct gt_node  nodes[GT_MAX_NODES];
+
+    bootstrap_3node_cluster(group, nodes, enc);
+    /*
+     * 0 - SYNCED
+     * 1 - PRIMARY
+     * 2 - JOINED
+     */
+
+    M *m0(NULL), *m1(NULL), *m2(NULL);
+    struct gcs_group* const g0(nodes[0].group.group());
+    struct gcs_group* const g1(nodes[1].group.group());
+    struct gcs_group* const g2(nodes[2].group.group());
+
+    try {
+        gcs_group_get_membership(*g0, NULL, &m0);
+        ck_abort_msg("Exception expected");
+    } catch (gu::Exception& e) {
+        ck_assert(NULL == m0);
     }
-    ck_assert(0 == group.nodes_num);
+    gcs_group_get_membership(*g0, ::malloc, &m0); ck_assert(NULL != m0);
+    gcs_group_get_membership(*g1, ::malloc, &m1); ck_assert(NULL != m1);
+    gcs_group_get_membership(*g2, ::malloc, &m2); ck_assert(NULL != m2);
+
+    ck_assert(3 == m0->num);
+
+    size_t const info_size(sizeof(decltype(m0->members[0])));
+    size_t const m_size(sizeof(M) + (m0->num - 1)*info_size);
+
+    ck_assert(0 == ::memcmp(m0, m1, m_size));
+    ck_assert(0 == ::memcmp(m1, m2, m_size));
+
+    ck_assert(0 ==
+              ::memcmp(&m0->group_uuid, &g0->group_uuid, sizeof(wsrep_uuid_t)));
+    ck_assert(m0->last_received == 0); // not supported yet
+    ck_assert(m0->updated == g0->act_id_);
+    ck_assert(m0->num == size_t(g2->num));
+
+    ck_assert(m0->members[0].status == WSREP_MEMBER_SYNCED);
+    ck_assert(m0->members[1].status == WSREP_MEMBER_UNDEFINED);
+    ck_assert(m0->members[2].status == WSREP_MEMBER_JOINED);
+
+    membership_check_flags(m0, 0, true, true, false, false);
+    membership_check_flags(m0, 1, false, false, false, false);
+    membership_check_flags(m0, 2, false, false, false, false);
+
+    ::free(m0);
+    ::free(m1);
+    ::free(m2);
+
+    // do SST from 0 tp 1 (to avoid hitting non-prim in shutdown_cluster() below
+    group.sst_start(1, nodes[0].group()->nodes[0].name);
+
+    gcs_group_get_membership(*g0, ::malloc, &m0); ck_assert(NULL != m0);
+
+    ck_assert(m0->members[0].status == WSREP_MEMBER_DONOR);
+    ck_assert(m0->members[1].status == WSREP_MEMBER_JOINER);
+    ck_assert(m0->members[2].status == WSREP_MEMBER_JOINED);
+
+    membership_check_flags(m0, 0, true, true, false, false);
+    membership_check_flags(m0, 1, false, false, false, false);
+    membership_check_flags(m0, 2, false, false, false, false);
+
+    ::free(m0);
+
+    group.deliver_join_sync_msg(0, GCS_MSG_JOIN); // end of donor SST
+    group.deliver_join_sync_msg(1, GCS_MSG_JOIN); // end of joiner SST
+
+    gcs_group_get_membership(*g0, ::malloc, &m0); ck_assert(NULL != m0);
+
+    ck_assert(m0->members[0].status == WSREP_MEMBER_JOINED);
+    ck_assert(m0->members[1].status == WSREP_MEMBER_JOINED);
+    ck_assert(m0->members[2].status == WSREP_MEMBER_JOINED);
+
+    ::free(m0);
+
+    group.deliver_join_sync_msg(0, GCS_MSG_SYNC);
+    group.deliver_join_sync_msg(1, GCS_MSG_SYNC);
+
+    gcs_group_get_membership(*g0, ::malloc, &m0); ck_assert(NULL != m0);
+
+    ck_assert(m0->members[0].status == WSREP_MEMBER_SYNCED);
+    ck_assert(m0->members[1].status == WSREP_MEMBER_SYNCED);
+    ck_assert(m0->members[2].status == WSREP_MEMBER_JOINED);
+
+    membership_check_flags(m0, 0, true, true, false, false);
+    membership_check_flags(m0, 1, false, true, false, false);
+    membership_check_flags(m0, 2, false, false, false, false);
+
+    ::free(m0);
+
+    shutdown_cluster(group);
+}
+
+START_TEST(gcs_membership_service_test)
+{
+    membership_service_test<struct wsrep_membership>(false);
+}
+END_TEST
+
+START_TEST(gcs_membership_service_testE)
+{
+    membership_service_test<struct wsrep_membership>(true);
+}
+END_TEST
+
+START_TEST(gcs_membership_service_v2_testE)
+{
+    membership_service_test<struct wsrep_membership_v2>(true);
 }
 END_TEST
 
 Suite *gcs_memb_suite(void)
 {
     Suite *suite = suite_create("GCS membership changes");
-    TCase *tcase = tcase_create("gcs_memb");
 
+    TCase *tcase = tcase_create("gcs_memb");
     suite_add_tcase  (suite, tcase);
     tcase_add_test   (tcase, gcs_memb_test_465);
-    tcase_set_timeout(tcase, 30);
+    tcase_add_test  (tcase, gcs_memb_test_465E);
+    tcase_set_timeout(tcase, 1200);
+
+    tcase = tcase_create("membership_service");
+    suite_add_tcase (suite, tcase);
+    tcase_add_test  (tcase, gcs_membership_service_test);
+    tcase_add_test  (tcase, gcs_membership_service_testE);
+    tcase_add_test  (tcase, gcs_membership_service_v2_testE);
+    tcase_set_timeout(tcase, 1200);
 
     return suite;
 }

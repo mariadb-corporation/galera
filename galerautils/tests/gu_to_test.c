@@ -203,8 +203,9 @@ int main (int argc, char* argv[])
                 thread[i].stat_cancels = 0;
                 thread[i].stat_fails   = 0;
                 thread[i].stat_self    = 0;
-                ret = pthread_create(&(thread[i].thread), NULL, run_thread,
-                                     &thread[i]);
+                ret = gu_thread_create(NULL,
+                                       &(thread[i].thread), run_thread,
+                                       &thread[i]);
                 if (ret) {
                     fprintf (stderr, "Failed to create thread %ld: %s",
                              i, strerror(ret));
@@ -217,7 +218,7 @@ int main (int argc, char* argv[])
         /* wait for threads to complete and accumulate statistics */
         gu_thread_join (thread[0].thread, NULL);
         for (i = 1; (ulong)i < thread_max; i++) {
-            pthread_join (thread[i].thread, NULL);
+            gu_thread_join (thread[i].thread, NULL);
             thread[0].stat_grabs   += thread[i].stat_grabs;
             thread[0].stat_cancels += thread[i].stat_cancels;
             thread[0].stat_fails   += thread[i].stat_fails;

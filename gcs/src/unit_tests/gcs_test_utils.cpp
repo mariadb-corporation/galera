@@ -3,6 +3,11 @@
  */
 
 #include "gcs_test_utils.hpp"
+#include "../../../gcache/src/gcache_test_encryption.hpp"
+
+#include <gu_throw.hpp>
+
+#include <boost/filesystem.hpp>
 
 #include "gu_inttypes.hpp"
 
@@ -24,12 +29,16 @@ InitConfig::InitConfig(gu::Config& cfg)
 InitConfig::InitConfig(gu::Config& cfg, const std::string& base_name)
 {
     common_ctor(cfg);
-    std::string p("gcache.size=1M;gcache.name=");
+    std::string p("gcache.size=1K;gcache.page_size=1K;gcache.name=");
     p += base_name;
+#ifndef NDEBUG
+    p += ";gcache.debug=4"; // additional gcache page debug info
+#endif
     gu_trace(cfg.parse(p));
 }
 
 GcsGroup::GcsGroup() :
+    path_   ("./"),
     conf_   (),
     init_   (conf_, "group"),
     gcache_ (NULL),
@@ -38,19 +47,52 @@ GcsGroup::GcsGroup() :
 {}
 
 void
-GcsGroup::common_ctor(const char*  node_name,
-                      const char*  inc_addr,
+GcsGroup::common_ctor(const std::string& node_name,
+                      const std::string& inc_addr,
+                      bool         enc,
                       gcs_proto_t  gver,
                       int          rver,
                       int          aver)
 {
     assert(NULL  == gcache_);
     assert(false == initialized_);
+    assert(path_ == "./");
 
-    conf_.set("gcache.name", std::string(node_name) + ".cache");
-    gcache_ = new gcache::GCache(NULL, conf_, ".");
+    path_ += node_name + "_gcache";
+    boost::filesystem::path const path(path_);
+    if (boost::filesystem::exists(path))
+    {
+        bool ok(false);
+        if (path != boost::filesystem::current_path())
+            ok = boost::filesystem::remove_all(path);
+
+        if (!ok)
+        {
+            gu_throw_fatal << "Can't remove: " << path;
+        }
+    }
+
+    if (!boost::filesystem::create_directories(path))
+    {
+        gu_throw_fatal << "Could not create directory: " << path
+                       << (boost::filesystem::exists(path) ?
+                           ": already exists." : ": doesn't exist.");
+    }
+
+    if (enc)
+    {
+        gcache_ = new gcache::GCache(NULL,conf_, path_, gcache_test_encrypt_cb,
+                                     NULL);
+        wsrep_enc_key_t const key = { node_name.c_str(), node_name.length() };
+        gcache_->set_enc_key(key);
+    }
+    else
+    {
+        gcache_ = new gcache::GCache(NULL, conf_, path_);
+    }
+
     group_ = new gcs_group(conf_, reinterpret_cast<gcache_t*>(gcache_),
-                           node_name, inc_addr, gver, rver, aver);
+                           node_name.c_str(), inc_addr.c_str(), gver, rver, aver);
     initialized_ = true;
 }
 
@@ -64,8 +106,11 @@ GcsGroup::common_dtor()
         delete group_;
         delete gcache_;
 
-        std::string const gcache_name(conf_.get("gcache.name"));
-        ::unlink(gcache_name.c_str());
+        boost::filesystem::path path(path_);
+        if (path != boost::filesystem::current_path())
+        {
+            boost::filesystem::remove_all(path);
+        }
     }
     else
     {
@@ -75,8 +120,9 @@ GcsGroup::common_dtor()
 }
 
 void
-GcsGroup::init(const char*  node_name,
-               const char*  inc_addr,
+GcsGroup::init(const std::string& node_name,
+               const std::string& inc_addr,
+               bool         enc,
                gcs_proto_t  gcs_proto_ver,
                int          repl_proto_ver,
                int          appl_proto_ver)
@@ -84,7 +130,10 @@ GcsGroup::init(const char*  node_name,
     common_dtor();
     initialized_ = false;
     gcache_ = NULL;
-    common_ctor(node_name, inc_addr,gcs_proto_ver,repl_proto_ver,appl_proto_ver);
+    path_ = "./";
+    conf_.set("gcache.dir", "");
+    common_ctor(node_name, inc_addr, enc,
+                gcs_proto_ver, repl_proto_ver, appl_proto_ver);
 }
 
 GcsGroup::~GcsGroup()
@@ -108,7 +157,9 @@ gt_node::deliver_last_applied(int const from, gcs_seqno_t const la)
     return gcs_group_handle_last_msg(group(), &msg);
 }
 
-gt_node::gt_node(const char* const name, int const gcs_proto_ver)
+gt_node::gt_node(const char* const name,
+                 int const gcs_proto_ver,
+                 bool const enc)
     : group(),
       id()
 {
@@ -126,10 +177,10 @@ gt_node::gt_node(const char* const name, int const gcs_proto_ver)
     int const str_len = sizeof(id) + 6;
     char name_str[str_len] = { '\0', };
     char addr_str[str_len] = { '\0', };
-    snprintf(name_str, str_len - 1, "name:%s", id);
-    snprintf(addr_str, str_len - 1, "addr:%s", id);
+    snprintf(name_str, str_len - 1, "name_%s", id);
+    snprintf(addr_str, str_len - 1, "addr_%s", id);
 
-    group.init(name_str, addr_str, gcs_proto_ver, 0, 0);
+    group.init(name_str, addr_str, enc, gcs_proto_ver, 0, 0);
 }
 
 gt_node::~gt_node()
@@ -243,14 +294,15 @@ gt_group::perform_state_exchange()
                 gcs_group_handle_state_msg (nodes[j]->group(), &state_msg);
 
             if (nodes_num - 1 == i) { // a message from the last node
+                assert(ret == GCS_GROUP_PRIMARY);
                 ck_assert_msg(ret == GCS_GROUP_PRIMARY,
                               "Handling state msg failed: sender %d, "
-                              "receiver %d", i, j);
+                              "receiver %d, ret: %d", i, j, ret);
             }
             else {
                 ck_assert_msg(ret == GCS_GROUP_WAIT_STATE_MSG,
                               "Handling state msg failed: sender %d, "
-                              "receiver %d", i, j);
+                              "receiver %d, ret: %d", i, j, ret);
             }
         }
 
@@ -428,10 +480,13 @@ gt_group::sst_start (int const joiner_idx,const char* donor_name)
         gcache::GCache* const gcache(nodes[i]->group.gcache());
         ck_assert(NULL != gcache);
         // sst request is expected to be dynamically allocated
-        char* const req_buf = (char*)gcache->malloc(req_len);
+        void* ptx; // plaintext buffer
+        char* const req_buf = (char*)gcache->malloc(req_len, ptx);
         ck_assert(NULL != req_buf);
-        ::memset(req_buf, 0, req_len);
-        sprintf (req_buf, "%s", donor_name);
+        ck_assert(NULL != ptx);
+        ::memset(ptx, 0, req_len);
+        sprintf (static_cast<char*>(ptx), "%s", donor_name);
+        gcache->drop_plaintext(req_buf);
 
         struct gcs_act_rcvd req(gcs_act(req_buf, req_len, GCS_ACT_STATE_REQ),
                                 NULL,
@@ -540,7 +595,8 @@ gt_group::sync_node(int const joiner_idx)
     return 0;
 }
 
-gt_group::gt_group(int const num, int const gcs_proto_ver, bool const prim)
+gt_group::gt_group(int const num, int const gcs_proto_ver, bool const prim,
+                   bool const enc)
     : nodes(),
       nodes_num(0),
       proto_ver(gcs_proto_ver),
@@ -552,7 +608,7 @@ gt_group::gt_group(int const num, int const gcs_proto_ver, bool const prim)
         {
             char name[32];
             sprintf(name, "%d", i);
-            add_node(new gt_node(name, gcs_proto_ver), true);
+            add_node(new gt_node(name, gcs_proto_ver, enc), true);
             bool const prim_state(nodes[0]->group.state() == GCS_GROUP_PRIMARY);
             ck_assert(prim_state == prim);
 

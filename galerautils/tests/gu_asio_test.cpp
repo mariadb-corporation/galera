@@ -6,11 +6,13 @@
 #include "gu_asio.hpp"
 #define GU_ASIO_IMPL
 #include "gu_asio_stream_engine.hpp"
+#include "gu_asio_socket_util.hpp" // set_fd_options()
 #include "gu_asio_test.hpp"
 #include "gu_buffer.hpp"
 #include "gu_compiler.hpp"
 
 #include <iterator>
+#include <fcntl.h>      // fcntl()
 #include <sys/socket.h> // recv(), send(), etc.
 
 //
@@ -98,12 +100,25 @@ public:
         }
     }
 
+    virtual void
+    update_address_info(const std::string& local_addr,
+                        const std::string& remote_addr) GALERA_OVERRIDE
+    {
+        ck_assert_int_eq(address_info_updated, false);
+        address_info_updated = true;
+    }
+
+    virtual void update_SSL_info() GALERA_OVERRIDE {
+        ck_assert(address_info_updated);
+    }
+
     enum op_status next_result;
     int next_error;
     size_t count_client_handshake_called;
     size_t count_server_handshake_called;
     size_t count_read_called;
     size_t count_write_called;
+    bool address_info_updated{false};
 
 private:
     int fd_;
@@ -208,6 +223,7 @@ public:
     }
     size_t bytes_written() const { return bytes_written_; }
     const gu::AsioErrorCode& last_error_code() const { return last_error_code_; }
+
 private:
     std::array<std::string, 2> write_buffer_;
     std::string read_buffer_;
@@ -368,6 +384,39 @@ START_TEST(test_tcp_socket)
 {
     gu::AsioIoService io_service;
     auto socket(io_service.make_socket(gu::URI("tcp://127.0.0.1:0")));
+}
+END_TEST
+
+// set_fd_options() runs from connect/accept completion handlers, which may
+// find the socket already closed. It must not throw there: a gu::Exception
+// escaping a completion handler propagates out of the gcomm event loop and
+// takes the whole backend down.
+START_TEST(test_set_fd_options_closed_socket)
+{
+    asio::io_context io_context;
+
+    // Never opened.
+    asio::ip::tcp::socket socket(io_context);
+    set_fd_options(socket);
+
+    // Opened, then closed again.
+    socket.open(asio::ip::tcp::v4());
+    socket.close();
+    set_fd_options(socket);
+
+    // Same for an acceptor, the other instantiation of the template.
+    asio::ip::tcp::acceptor acceptor(io_context);
+    set_fd_options(acceptor);
+    acceptor.open(asio::ip::tcp::v4());
+    acceptor.close();
+    set_fd_options(acceptor);
+
+    // An open socket must still get the flag set.
+    socket.open(asio::ip::tcp::v4());
+    set_fd_options(socket);
+    int flags(fcntl(native_socket_handle(socket), F_GETFD, 0));
+    ck_assert(flags != -1);
+    ck_assert(flags & FD_CLOEXEC);
 }
 END_TEST
 
@@ -1126,6 +1175,9 @@ static EVP_PKEY* create_key()
     BN_free(bn);
     return pkey;
 #else
+#if OPENSSL_VERSION_NUMBER < 0x30004000L
+    OPENSSL_init_ssl(OPENSSL_INIT_LOAD_SSL_STRINGS, NULL);
+#endif
     auto* ret = EVP_RSA_gen(2048);
     if (!ret)
     {
@@ -1152,6 +1204,12 @@ static void write_key(EVP_PKEY* pkey, const std::string& filename)
     const std::string cert_dir = get_cert_dir();
     const std::string key_file_path = cert_dir + "/" + filename;
     auto* key_file = open_file(key_file_path, "wb");
+    if (!key_file)
+    {
+        const auto* errstr = ::strerror(errno);
+        gu_throw_fatal << "Could not open file " << key_file_path << ": "
+                       << errstr;
+    }
     if (!PEM_write_PrivateKey(key_file, pkey, nullptr, nullptr, 0, password_cb,
                               nullptr))
     {
@@ -1207,12 +1265,21 @@ static X509* create_x509(EVP_PKEY* pkey, X509* issuer, const char* cn,
     auto* x509 = X509_new();
     /* According to standard, value 2 means version 3. */
     X509_set_version(x509, 2);
-    ASN1_INTEGER_set(X509_get_serialNumber(x509), 1);
-    X509_gmtime_adj(X509_get_notBefore(x509), 0);
-    X509_gmtime_adj(X509_get_notAfter(x509), 31536000L);
+    /* OpenSSL 1.x returns non-const pointers from X509_get_serialNumber(),
+     * X509_get_notBefore(), and X509_get_notAfter(). OpenSSL 4.0 made
+     * these getters const-correct (returning const pointers). The
+     * underlying objects remain mutable, so const_cast is safe and
+     * preserves compatibility with all versions. */
+    ASN1_INTEGER_set(const_cast<ASN1_INTEGER*>(X509_get_serialNumber(x509)), 1);
+    X509_gmtime_adj(const_cast<ASN1_TIME*>(X509_get_notBefore(x509)), 0);
+    X509_gmtime_adj(const_cast<ASN1_TIME*>(X509_get_notAfter(x509)), 31536000L);
     X509_set_pubkey(x509, pkey);
 
-    auto* name = X509_get_subject_name(x509);
+    /* OpenSSL 1.x returns a non-const X509_NAME* from X509_get_subject_name().
+     * OpenSSL 4.0 made this getter const-correct (returning const X509_NAME*).
+     * The name is still mutable, so const_cast is safe and keeps the code
+     * compatible with all versions. */
+    auto* name = const_cast<X509_NAME*>(X509_get_subject_name(x509));
     static const unsigned char C_str [] = "FI";
     static const unsigned char ST_str[] = "Uusimaa";
     static const unsigned char L_str [] = "Helsinki";
@@ -1233,7 +1300,11 @@ static X509* create_x509(EVP_PKEY* pkey, X509* issuer, const char* cn,
     }
     else
     {
-        X509_set_issuer_name(x509, X509_get_subject_name(issuer));
+        /* OpenSSL 1.x returns a non-const X509_NAME* from X509_get_subject_name().
+         * OpenSSL 4.0 made this getter const-correct (returning const X509_NAME*).
+         * The name is still mutable, so const_cast is safe and keeps the code
+         * compatible with all versions. */
+        X509_set_issuer_name(x509, const_cast<X509_NAME*>(X509_get_subject_name(issuer)));
     }
 
     set_x509v3_extensions(x509, issuer, is_ca);
@@ -1248,6 +1319,12 @@ static void write_x509(X509* x509, const std::string& filename)
     const std::string cert_dir = get_cert_dir();
     const std::string file_path = cert_dir + "/" + filename;
     auto* file = open_file(file_path, "wb");
+    if (!file)
+    {
+        const auto* errstr = ::strerror(errno);
+        gu_throw_fatal << "Could not open file " << file_path << ": "
+                       << errstr;
+    }
     if (!PEM_write_X509(file, x509))
     {
         throw_error("Could not write x509");
@@ -1261,6 +1338,12 @@ static void write_x509_list(const std::vector<X509*>& certs,
     const std::string cert_dir = get_cert_dir();
     const std::string file_path = cert_dir + "/" + filename;
     auto* file = open_file(file_path, "wb");
+    if (!file)
+    {
+        const auto* errstr = ::strerror(errno);
+        gu_throw_fatal << "Could not open file " << file_path << ": "
+                       << errstr;
+    }
     for (auto* x509 : certs)
     {
         if (!PEM_write_X509(file, x509))
@@ -2461,6 +2544,10 @@ Suite* gu_asio_suite()
 
     tc = tcase_create("test_tcp_socket");
     tcase_add_test(tc, test_tcp_socket);
+    suite_add_tcase(s, tc);
+
+    tc = tcase_create("test_set_fd_options_closed_socket");
+    tcase_add_test(tc, test_set_fd_options_closed_socket);
     suite_add_tcase(s, tc);
 
     tc = tcase_create("test_tcp_socket_receive_buffer_size_unopened");

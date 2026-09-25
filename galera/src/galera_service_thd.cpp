@@ -6,6 +6,7 @@
  */
 
 #include "galera_service_thd.hpp"
+#include "gu_thread_keys.hpp"
 
 const uint32_t galera::ServiceThd::A_NONE = 0;
 
@@ -88,12 +89,13 @@ galera::ServiceThd::ServiceThd (GcsI& gcs, gcache::GCache& gcache) :
     gcache_ (gcache),
     gcs_    (gcs),
     thd_    (),
-    mtx_    (),
-    cond_   (),
-    flush_  (),
+    mtx_    (gu::get_mutex_key(gu::GU_MUTEX_KEY_SERVICE_THREAD)),
+    cond_   (gu::get_cond_key(gu::GU_COND_KEY_SERVICE_THREAD)),
+    flush_  (gu::get_cond_key(gu::GU_COND_KEY_SERVICE_THREAD_FLUSH)),
     data_   ()
 {
-    gu_thread_create (&thd_, NULL, thd_func, this);
+    gu_thread_create (gu::get_thread_key(gu::GU_THREAD_KEY_SERVICE), &thd_,
+                      thd_func, this);
 }
 
 galera::ServiceThd::~ServiceThd () noexcept(false)

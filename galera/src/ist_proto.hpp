@@ -448,8 +448,9 @@ namespace galera
 
                 std::array<gu::AsioConstBuffer, 3> cbs;
 
-                size_t      payload_size; /* size of the 2nd cbs buffer */
+                ssize_t     payload_size; /* size of the 2nd cbs buffer */
                 size_t      sent;
+                bool        drop_plaintext(false);
 
                 // for proto ver < VER40 compatibility
                 int64_t seqno_d(WSREP_SEQNO_UNDEFINED);
@@ -459,14 +460,18 @@ namespace galera
                     assert(Message::T_TRX == type || version_ >= VER40);
 
                     galera::WriteSetIn ws;
-                    gu::Buf tmp = { buffer.ptr(), buffer.size() };
+                    gu::Buf tmp = {
+                        gcache_.get_ro_plaintext(buffer.ptr()),
+                        buffer.size()
+                    };
+                    drop_plaintext = true; // drop plaintext AFTER sending
 
                     if (keep_keys_ || Message::T_CCHANGE == type)
                     {
-                        payload_size = buffer.size();
-                        const void* const ptr(buffer.ptr());
-                        cbs[1] = gu::AsioConstBuffer(ptr, payload_size);
-                        cbs[2] = gu::AsioConstBuffer(ptr, 0);
+                        payload_size = tmp.size;
+
+                        cbs[1] = gu::AsioConstBuffer(tmp.ptr, tmp.size);
+                        cbs[2] = gu::AsioConstBuffer(tmp.ptr, 0);
 
                         if (gu_likely(Message::T_TRX == type)) // compatibility
                         {
@@ -482,6 +487,8 @@ namespace galera
                         WriteSetIn::GatherVector out;
                         payload_size = ws.gather (out, false, false);
                         assert (2 == out->size());
+                        assert (payload_size == out[0].size + out[1].size);
+
                         cbs[1] = gu::AsioConstBuffer(out[0].ptr, out[0].size);
                         cbs[2] = gu::AsioConstBuffer(out[1].ptr, out[1].size);
 
@@ -533,7 +540,11 @@ namespace galera
                     sent = socket.write(cbs[0]);
                 }
 
-                log_debug << "sent " << sent << " bytes";
+                log_debug << "sent " << sent << " bytes with seqno "
+                          << buffer.seqno_g();
+
+                if (gu_likely(drop_plaintext))
+                    gcache_.drop_plaintext(buffer.ptr());
             }
 
             void skip_bytes(gu::AsioSocket& socket, size_t bytes)
@@ -650,6 +661,9 @@ namespace galera
                         try
                         {
                             wbuf = gcache_.seqno_get_ptr(seqno_g, wsize);
+                            /* increment ref count to match that of
+                             * uncached events below */
+                            gcache_.get_ro_plaintext(wbuf);
 
                             skip_bytes(socket, msg.len() - offset);
 
@@ -666,10 +680,15 @@ namespace galera
                         if (gu_likely(msg_type != Message::T_SKIP))
                         {
                             wsize = msg.len() - offset;
-
-                            void*   const ptr(gcache_.malloc(wsize));
+                            void* ptx;
+                            void* const ptr(gcache_.malloc(wsize, ptx));
                             ssize_t const r
-                                (socket.read(gu::AsioMutableBuffer(ptr, wsize)));
+                                (socket.read(gu::AsioMutableBuffer(ptx, wsize)));
+                            /* Since IST events are normally processed right
+                             * away, we want the plaintext to linger until the
+                             * event is done with and free()'d, so not dropping
+                             * plaintext here, but it will require additional
+                             * refcount decrement before freeing. */
 
                             if (gu_unlikely(r != wsize))
                             {
@@ -684,7 +703,8 @@ namespace galera
                         else
                         {
                             wsize = GU_WORDSIZE/8; // bits to bytes
-                            wbuf  = gcache_.malloc(wsize);
+                            void* ptx;
+                            wbuf  = gcache_.malloc(wsize, ptx);
                         }
 
                         gcache_.seqno_assign(wbuf, msg.seqno(), gcs_type,

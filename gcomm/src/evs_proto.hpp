@@ -375,6 +375,19 @@ public:
     void handle_retrans_timer();
     void handle_install_timer();
     void handle_stats_timer();
+    // Clamp install_timeout into (suspect_timeout, inactive_timeout) with a
+    // retrans-period margin, warning if that overrides a configured value (when
+    // warn_on_adjust) and if the suspect/inactive window is too narrow. Returns
+    // true if install_timeout_ was changed. Does NOT touch timers - callers
+    // reset T_INSTALL afterwards if needed (it must not run before timers/state
+    // are ready, e.g. during construction). See MDEV-38920.
+    bool sanitize_install_timeout(bool warn_on_adjust);
+    // Cap inactive_check_period at retrans_period (evs.keepalive_period),
+    // warning if that overrides a configured value (when warn_on_adjust).
+    // Returns true if inactive_check_period_ was changed. Does NOT touch
+    // timers - callers reset T_INACTIVITY afterwards if needed (it must not
+    // run before timers/state are ready, e.g. during construction).
+    bool sanitize_inactive_check_period(bool warn_on_adjust);
     gu::datetime::Date next_expiration(const Timer) const;
     void reset_timer(Timer);
     void cancel_timer(Timer);

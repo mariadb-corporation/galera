@@ -60,11 +60,6 @@ namespace gcache
         /* GCache 3.x is not supposed to be portable between platforms */
         static size_type const ALIGNMENT  = GU_MIN_ALIGNMENT;
 
-        static inline size_type align_size(size_type s)
-        {
-            return align<size_type>(s);
-        }
-
         static inline uint8_t* align_ptr(uint8_t* p)
         {
             return reinterpret_cast<uint8_t*>(align<uintptr_t>(uintptr_t(p)));
@@ -74,6 +69,7 @@ namespace gcache
 
         template <typename T>
         static inline T align(T s) { return GU_ALIGN(s, ALIGNMENT); }
+
     };
 }
 

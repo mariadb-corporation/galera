@@ -6,6 +6,9 @@
 
 #include "../gcs_defrag.hpp"
 
+#include "gcs_test_utils.hpp"
+#include <gcache_test_encryption.hpp>
+
 #include "gcs_defrag_test.hpp" // must be included last
 
 #define TRUE (0 == 0)
@@ -22,9 +25,28 @@ defrag_check_init (gcs_defrag_t* defrag)
     ck_assert(defrag->frag_no  == 0);
 }
 
-START_TEST (gcs_defrag_test)
+static void
+defrag(bool const enc)
 {
     ssize_t ret;
+
+    // Environment
+    gu::Config config;
+    std::string const cache_name("defrag.cache");
+    gcs_test::InitConfig(config, cache_name);
+    gcache::GCache* cache;
+
+    if (enc)
+    {
+        cache = new gcache::GCache(NULL, config, ".", gcache_test_encrypt_cb,
+                                   NULL);
+        wsrep_enc_key_t const key = { cache, sizeof(*cache) };
+        cache->set_enc_key(key);
+    }
+    else
+    {
+        cache = new gcache::GCache(NULL, config, ".", NULL, NULL);
+    }
 
     // The Action
     char         act_buf[]  = "Test action smuction";
@@ -49,11 +71,6 @@ START_TEST (gcs_defrag_test)
     void* tail;
 
     mark_point();
-
-#ifndef NDEBUG
-    // debug build breaks this test due to asserts
-    return;
-#endif
 
     // Initialize message parameters
     frg1.act_id    = getpid();
@@ -83,7 +100,7 @@ START_TEST (gcs_defrag_test)
     mark_point();
 
     // ready for the first fragment
-    gcs_defrag_init (&defrag, NULL);
+    gcs_defrag_init (&defrag, reinterpret_cast<gcache_t*>(cache));
     defrag_check_init (&defrag);
 
     mark_point();
@@ -99,7 +116,8 @@ START_TEST (gcs_defrag_test)
     ck_assert(ret == 0);
     ck_assert(defrag.head != NULL);
     ck_assert(defrag.received == frag1_len);
-    ck_assert(defrag.tail == defrag.head + defrag.received);
+    ck_assert(defrag.tail ==
+              static_cast<uint8_t*>(defrag.plain) + defrag.received);
     tail = defrag.tail;
 
 #define TRY_WRONG_2ND_FRAGMENT(frag)                                    \
@@ -122,44 +140,60 @@ START_TEST (gcs_defrag_test)
     ret = gcs_defrag_handle_frag (&defrag, &frg2, &recv_act, FALSE);
     ck_assert(ret == 0);
     ck_assert(defrag.received == frag1_len + frag2_len);
-    ck_assert(defrag.tail == defrag.head + defrag.received);
+    ck_assert(defrag.tail ==
+              static_cast<uint8_t*>(defrag.plain) + defrag.received);
 
     // 7. Try third fragment, last one
     ret = gcs_defrag_handle_frag (&defrag, &frg3, &recv_act, FALSE);
     ck_assert(ret == (long)act_len);
 
+#define CHECK_ACTION(origin)                                            \
+    {                                                                   \
+        const char* ptx                                                 \
+            (static_cast<const char*>(cache->get_ro_plaintext(recv_act.buf))); \
+        ck_assert_msg(!strncmp(ptx, act_buf, act_len),                  \
+                      "%s action received: '%s', expected '%s'",        \
+                      origin, ptx, act_buf);                            \
+        cache->free(const_cast<void*>(recv_act.buf));                   \
+    }
+
     // 8. Check the action
     ck_assert(recv_act.buf != NULL);
     ck_assert(recv_act.buf_len == (long)act_len);
-    ck_assert_msg(!strncmp((const char*)recv_act.buf, act_buf, act_len),
-                  "Action received: '%s', expected '%s'",
-                  static_cast<const char*>(recv_act.buf) ,act_buf);
+    CHECK_ACTION("Remote");
     defrag_check_init (&defrag); // should be empty
-
-    gcs_gcache_free(defrag.cache, recv_act.buf);
 
     // 9. Try the same with local action
     ret = gcs_defrag_handle_frag (&defrag, &frg1, &recv_act, TRUE);
     ck_assert(ret == 0);
-//    ck_assert(defrag.head == NULL); (and now we may allocate it for cache)
 
     ret = gcs_defrag_handle_frag (&defrag, &frg2, &recv_act, TRUE);
     ck_assert(ret == 0);
-//    ck_assert(defrag.head == NULL); (and now we may allocate it for cache)
 
     ret = gcs_defrag_handle_frag (&defrag, &frg3, &recv_act, TRUE);
     ck_assert(ret == (long)act_len);
-//    ck_assert(defrag.head == NULL); (and now we may allocate it for cache)
-
+    CHECK_ACTION("Local");
 
     // 10. Check the action
     ck_assert(recv_act.buf != NULL);
     ck_assert(recv_act.buf_len == (long)act_len);
-//    ck_assert(recv_act.buf == NULL); (and now we may allocate it for cache)
 
     defrag_check_init (&defrag); // should be empty
 
-    gcs_gcache_free(defrag.cache, recv_act.buf);
+    mark_point();
+    delete cache;
+    ::unlink(cache_name.c_str());
+}
+
+START_TEST (gcs_defrag_test)
+{
+    defrag(false);
+}
+END_TEST
+
+START_TEST (gcs_defrag_testE)
+{
+    defrag(true);
 }
 END_TEST
 
@@ -170,6 +204,7 @@ Suite *gcs_defrag_suite(void)
 
   suite_add_tcase (suite, tcase);
   tcase_add_test  (tcase, gcs_defrag_test);
+  tcase_add_test  (tcase, gcs_defrag_testE);
   return suite;
 }
 

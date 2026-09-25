@@ -42,9 +42,13 @@ class gu::Monitor
 public:
 
 #ifndef NDEBUG
-    Monitor() : refcnt(0), mutex(), cond(), holder(0) {}
+    Monitor(const wsrep_mutex_key_t* mutex_key,
+            const wsrep_cond_key_t* cond_key)
+        : refcnt(0), mutex(mutex_key), cond(cond_key), holder() {}
 #else
-    Monitor() : refcnt(0), mutex(), cond() {}
+    Monitor(const wsrep_mutex_key_t* mutex_key,
+            const wsrep_cond_key_t* cond_key)
+        : refcnt(0), mutex(mutex_key), cond(cond_key) {}
 #endif
 
     ~Monitor() {}

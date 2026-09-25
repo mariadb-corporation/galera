@@ -91,7 +91,8 @@ libgalerautilsxx_sources = [
     'gu_asio_stream_react.cpp',
     'gu_asio_stream_engine.cpp',
     'gu_debug_sync.cpp',
-    'gu_thread.cpp'
+    'gu_thread.cpp',
+    'gu_thread_keys.cpp'
 ]
 
 #libgalerautilsxx_objs  = libgalerautilsxx_env.Object(

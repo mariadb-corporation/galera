@@ -15,8 +15,8 @@ namespace galera
         :
         gconf_         (&config),
         gcache_        (&cache),
-        mtx_           (),
-        cond_          (),
+        mtx_           (0),
+        cond_          (0),
         global_seqno_  (0),
         local_seqno_   (0),
         uuid_          (NULL, 0),
@@ -36,8 +36,8 @@ namespace galera
         :
         gconf_         (0),
         gcache_        (0),
-        mtx_           (),
-        cond_          (),
+        mtx_           (0),
+        cond_          (0),
         global_seqno_  (0),
         local_seqno_   (0),
         uuid_          (NULL, 0),

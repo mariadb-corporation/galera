@@ -17,13 +17,12 @@
 #ifdef GU_DEBUG_MUTEX
 
 int gu_mutex_init_DBG (gu_mutex_t_DBG *m,
-                       const gu_mutexattr_t_SYS* attr,
                        const char *file, unsigned int line)
 {
-    gu_mutex_init_SYS(&m->mutex, attr);
-    gu_cond_init_SYS(&m->cond, NULL);
+    gu_mutex_init_SYS(NULL, &m->mutex);
+    gu_cond_init_SYS(NULL, &m->cond);
 
-    m->thread            = gu_thread_self_SYS();
+    m->thread            = gu_thread_self();
     m->file              = file;
     m->line              = line;
     m->waiter_count      = 0;
@@ -45,7 +44,7 @@ void _wait_unlocked(gu_mutex_t_DBG* m)
 int gu_mutex_lock_DBG(gu_mutex_t_DBG *m,
                       const char *file, unsigned int line)
 {
-    gu_thread_t_SYS const self = gu_thread_self_SYS();
+    gu_thread_t const self = gu_thread_self();
 
     int const err = gu_mutex_lock_SYS(&m->mutex);
 
@@ -53,7 +52,7 @@ int gu_mutex_lock_DBG(gu_mutex_t_DBG *m,
     {
         while (m->locked)
         {
-            if (gu_thread_equal_SYS(self, m->thread)) {
+            if (gu_thread_equal(self, m->thread)) {
                 gu_fatal("Second mutex lock attempt by the same thread, %lx, "
                          "at %s:%d, first locked at %s:%d",
                          self, file, line, m->file, m->line);
@@ -77,13 +76,13 @@ int gu_mutex_lock_DBG(gu_mutex_t_DBG *m,
 int gu_mutex_unlock_DBG (gu_mutex_t_DBG *m,
                          const char *file, unsigned int line)
 {
-    gu_thread_t_SYS const self = gu_thread_self_SYS();
+    gu_thread_t const self = gu_thread_self();
 
     int err = gu_mutex_lock_SYS(&m->mutex);
 
     if (gu_likely(0 == err))
     {
-        if (m->locked && !gu_thread_equal_SYS(self, m->thread)) {
+        if (m->locked && !gu_thread_equal(self, m->thread)) {
             /** last time pthread_t was unsigned long int */
             gu_fatal ("%lx attempts to unlock mutex at %s:%d "
                       "locked by %lx at %s:%d",
@@ -121,7 +120,7 @@ int gu_mutex_unlock_DBG (gu_mutex_t_DBG *m,
 int gu_mutex_destroy_DBG (gu_mutex_t_DBG *m,
                           const char *file, unsigned int line)
 {
-    gu_thread_t_SYS const self = gu_thread_self_SYS();
+    gu_thread_t const self = gu_thread_self();
 
     int err = gu_mutex_lock_SYS(&m->mutex);
 
@@ -133,7 +132,7 @@ int gu_mutex_destroy_DBG (gu_mutex_t_DBG *m,
             assert(0);
         }
         else if (m->locked) {
-            if (gu_thread_equal_SYS(self, m->thread)) {
+            if (gu_thread_equal(self, m->thread)) {
                 gu_error ("%lx attempts to destroy mutex locked by "
                           "itself at %s:%d",
                           self, m->file, m->line);
@@ -170,7 +169,7 @@ int gu_mutex_destroy_DBG (gu_mutex_t_DBG *m,
 
                 m->file   = NULL;
                 m->line   = 0;
-                m->thread = GU_THREAD_INITIALIZER_SYS;
+                m->thread = GU_THREAD_INITIALIZER;
             }
 
             return err;
@@ -186,7 +185,7 @@ int gu_cond_twait_DBG (gu_cond_t_SYS *cond, gu_mutex_t_DBG *m,
                        const struct timespec *abstime,
                        const char *file, unsigned int line)
 {
-    gu_thread_t_SYS const self = gu_thread_self_SYS();
+    gu_thread_t const self = gu_thread_self();
 
     int err = gu_mutex_lock_SYS(&m->mutex);
 
@@ -197,7 +196,7 @@ int gu_cond_twait_DBG (gu_cond_t_SYS *cond, gu_mutex_t_DBG *m,
                       "at %s %d", self, file, line);
             assert (0);
         }
-        else if (!gu_thread_equal_SYS(self, m->thread)) {
+        else if (!gu_thread_equal(self, m->thread)) {
             gu_fatal ("%lx tries to wait for condition on the mutex locked "
                       "by %lx at %s %d", self, m->thread, file, line);
             assert (0);
@@ -226,7 +225,7 @@ int gu_cond_twait_DBG (gu_cond_t_SYS *cond, gu_mutex_t_DBG *m,
         }
 
         m->locked = true;
-        assert(!gu_thread_equal_SYS(self, m->thread) || 0 != err);
+        assert(!gu_thread_equal(self, m->thread) || 0 != err);
         m->thread = self;
         m->file = file;
         m->line = line;
@@ -291,3 +290,5 @@ int gu_barrier_wait_SYS (gu_barrier_t_SYS *barrier)
 }
 
 #endif /* __APPLE__ */
+
+wsrep_thread_service_v1_t* gu_thread_service = 0;

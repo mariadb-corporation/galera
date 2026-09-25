@@ -41,6 +41,8 @@ public:
 
     std::string get_ssl_password() const;
 
+    bool tls_service_enabled() const override
+    { return (io_service_.tls_service() != nullptr); }
 private:
 
     bool timer_expired_;

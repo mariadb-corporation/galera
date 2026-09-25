@@ -9,7 +9,7 @@
  */
 
 #include "gcs_sm.hpp"
-
+#include <gu_thread_keys.hpp>
 #include <string.h>
 
 static void
@@ -45,8 +45,8 @@ gcs_sm_create (long len, long n)
 
     if (sm) {
         sm_init_stats (&sm->stats);
-        gu_mutex_init (&sm->lock, NULL);
-        gu_cond_init  (&sm->cond, NULL);
+        gu_mutex_init (gu::get_mutex_key(gu::GU_MUTEX_KEY_GCS_SM), &sm->lock);
+        gu_cond_init  (gu::get_cond_key(gu::GU_COND_KEY_GCS_SM), &sm->cond);
         sm->cond_wait   = 0;
         sm->wait_q_len  = len;
         sm->wait_q_mask = sm->wait_q_len - 1;
@@ -86,7 +86,7 @@ gcs_sm_close (gcs_sm_t* sm)
     if (sm->pause) _gcs_sm_continue_common (sm);
 
     gu_cond_t cond;
-    gu_cond_init (&cond, NULL);
+    gu_cond_init (gu::get_cond_key(gu::GU_COND_KEY_GCS_SM_CLOSE), &cond);
 
     // in case the queue is full
     while (sm->users >= (long)sm->wait_q_len) {

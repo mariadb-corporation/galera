@@ -63,7 +63,20 @@ namespace galera
                              size_t          data_len) = 0;
         virtual void    get_stats(gcs_stats*) const = 0;
         virtual void    flush_stats() = 0;
-        virtual void    get_status(gu::Status&) const = 0;
+        virtual int     get_status(gu::Status&) const = 0;
+        virtual void    get_membership(wsrep_allocator_cb        alloc,
+                                       struct wsrep_membership** memb) const =0;
+        virtual void    get_membership(wsrep_allocator_cb        alloc,
+                                       struct wsrep_membership_v2** memb) const =0;
+        virtual int     fetch_pfs_info(wsrep_node_info_t** nodes,
+                                       uint32_t* size,
+                                       int32_t* my_index,
+                                       uint32_t max_version) = 0;
+        virtual int     fetch_pfs_stat(wsrep_node_stat_t** nodes,
+                                       uint32_t* size,
+                                       int32_t* my_index,
+                                       uint32_t max_version) = 0;
+
         /*! @throws NotFound */
         virtual void    param_set (const std::string& key,
                                    const std::string& value) = 0;
@@ -237,9 +250,39 @@ namespace galera
             return gcs_flush_stats(conn_);
         }
 
-        void get_status(gu::Status& status) const
+        int get_status(gu::Status& status) const
         {
-            gcs_get_status(conn_, status);
+            return gcs_get_status(conn_, status);
+        }
+
+        int fetch_pfs_info(wsrep_node_info_t** nodes,
+                           uint32_t* size,
+                           int32_t* my_index,
+                           uint32_t max_version)
+        {
+            return gcs_fetch_pfs_info(conn_, nodes, size, my_index,
+                                      max_version);
+        }
+
+        int fetch_pfs_stat(wsrep_node_stat_t** nodes,
+                           uint32_t* size,
+                           int32_t* my_index,
+                           uint32_t max_version)
+        {
+            return gcs_fetch_pfs_stat(conn_, nodes, size, my_index,
+                                      max_version);
+        }
+
+        void get_membership(wsrep_allocator_cb alloc,
+                            struct wsrep_membership** memb) const
+        {
+	    gcs_get_membership(conn_, alloc, memb);
+        }
+
+        void get_membership(wsrep_allocator_cb alloc,
+                            struct wsrep_membership_v2** memb) const
+        {
+            gcs_get_membership(conn_, alloc, memb);
         }
 
         void param_set (const std::string& key, const std::string& value)
@@ -312,16 +355,17 @@ namespace galera
             if (gu_likely(0 != gcache_ && ret > 0))
             {
                 assert (ret == act.size);
-                gu::byte_t* ptr(
-                    reinterpret_cast<gu::byte_t*>(gcache_->malloc(act.size)));
-                act.buf = ptr;
+                void* ptx;
+                act.buf = gcache_->malloc(act.size, ptx);
                 ssize_t copied(0);
                 for (int i(0); copied < act.size; ++i)
                 {
-                    memcpy (ptr + copied, actv[i].ptr, actv[i].size);
+                    ::memcpy(static_cast<gu::byte_t*>(ptx) + copied,
+                             actv[i].ptr, actv[i].size);
                     copied += actv[i].size;
                 }
                 assert (copied == act.size);
+                gcache_->drop_plaintext(act.buf);
             }
 
             return ret;
@@ -334,8 +378,10 @@ namespace galera
             if (gu_likely(0 != gcache_ && ret > 0))
             {
                 assert (ret == act.size);
-                void* const ptr(gcache_->malloc(act.size));
-                memcpy (ptr, act.buf, act.size);
+                void* ptx;
+                void* const ptr(gcache_->malloc(act.size, ptx));
+                memcpy (ptx, act.buf, act.size);
+                gcache_->drop_plaintext(ptr);
                 act.buf = ptr;
                 // no freeing here - initial act.buf belongs to the caller
             }
@@ -411,8 +457,38 @@ namespace galera
 
         void flush_stats() {}
 
-        void get_status(gu::Status& status) const
-        {}
+        int get_status(gu::Status& status) const
+        {
+	    return 0;
+	}
+
+        int fetch_pfs_info(wsrep_node_info_t** nodes,
+                           uint32_t* size,
+                           int32_t* my_index,
+                           uint32_t max_version)
+        {
+            return -ENOTCONN;
+        }
+
+        int fetch_pfs_stat(wsrep_node_stat_t** nodes,
+                           uint32_t* size,
+                           int32_t* my_index,
+                           uint32_t max_version)
+        {
+            return -ENOTCONN;
+        }
+
+        void get_membership(wsrep_allocator_cb        alloc,
+                            struct wsrep_membership** memb) const
+        {
+            *memb = 0;
+        }
+
+        void get_membership(wsrep_allocator_cb        alloc,
+                            struct wsrep_membership_v2** memb) const
+        {
+	    *memb = 0;
+        }
 
         void param_set (const std::string& key, const std::string& value)
         {}

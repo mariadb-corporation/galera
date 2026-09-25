@@ -1,10 +1,16 @@
 //
-// Copyright (C) 2010-2021 Codership Oy <info@codership.com>
+// Copyright (C) 2010-2024 Codership Oy <info@codership.com>
 //
+
+#include "wsrep_api.h"
+#include "wsrep_ps.h"
 
 #include "key_data.hpp"
 #include "gu_serialize.hpp"
-#include "gu_asio.hpp" //  // gu::init_allowlist_service_v1()
+#include "gu_asio.hpp" // gu::init_tls_service_v1(), gu::init_allowlist_service_v1()
+#include "gu_thread_keys.hpp"
+#include "gu_asio.hpp" // gu::init_tls_service_v1()
+#include "wsrep_membership_service.h"
 
 #if defined(GALERA_MULTIMASTER)
 #include "replicator_smm.hpp"
@@ -17,6 +23,7 @@
 #include "gu_event_service.hpp"
 #include "wsrep_config_service.h"
 #include "wsrep_node_isolation.h"
+#include "wsrep_connection_monitor_service.h"
 
 #include <cassert>
 
@@ -156,9 +163,28 @@ char* galera_parameters_get (wsrep_t* gh)
 }
 
 extern "C"
-wsrep_status_t galera_enc_set_key(wsrep_t* gh, const wsrep_enc_key_t*key)
+wsrep_status_t galera_enc_set_key(wsrep_t* gh, const wsrep_enc_key_t* key)
 {
-    return WSREP_NOT_IMPLEMENTED;
+    static wsrep_enc_key_t null_key = { NULL, 0 };
+
+    REPL_CLASS * repl(reinterpret_cast< REPL_CLASS * >(gh->ctx));
+
+    if (NULL == key) key = &null_key;
+
+    try
+    {
+        return repl->enc_set_key(*key);
+    }
+    catch(std::exception& e)
+    {
+        log_error << e.what();
+        return WSREP_NODE_FAIL;
+    }
+    catch(...)
+    {
+        log_fatal << "non-standard exception";
+        return WSREP_FATAL;
+    }
 }
 
 extern "C"
@@ -510,12 +536,8 @@ galera_terminate_trx(wsrep_t*           const gh,
         trx->set_state(TrxHandle::S_MUST_ABORT);
         trx->set_state(TrxHandle::S_ABORTING);
     }
-    wsrep_status_t retval(repl->send(*trx, meta));
-    if (retval == WSREP_OK)
-    {
-        retval = galera_sync_wait(gh, NULL, -1, NULL);
-    }
-    return retval;
+
+    return repl->terminate_trx(*trx, meta);
 }
 
 extern "C" wsrep_status_t wsrep_certify_v1(wsrep_t* gh,
@@ -1645,6 +1667,16 @@ static wsrep_t galera_str = {
 extern "C"
 int wsrep_loader(wsrep_t *hptr);
 
+extern "C"
+int wsrep_init_connection_monitor_service_v1(wsrep_connection_monitor_service_v1_t *connection_monitor_service)
+{
+    return gu::init_connection_monitor_service_v1(connection_monitor_service);
+}
+
+extern "C" void wsrep_deinit_connection_monitor_service_v1()
+{
+    gu::deinit_connection_monitor_service_v1();
+}
 
 extern "C"
 int wsrep_loader(wsrep_t *hptr)
@@ -1662,6 +1694,92 @@ int wsrep_loader(wsrep_t *hptr)
     }
 
     return WSREP_OK;
+}
+
+extern "C"
+int wsrep_init_thread_service_v1(wsrep_thread_service_v1_t* ts)
+
+{
+    return gu::init_thread_service_v1(ts);
+}
+
+extern "C"
+void wsrep_deinit_thread_service_v1()
+{
+    gu::deinit_thread_service_v1();
+}
+
+extern "C"
+int wsrep_init_tls_service_v1(wsrep_tls_service_v1_t *tls_service)
+{
+    return gu::init_tls_service_v1(tls_service);
+}
+
+extern "C" void wsrep_deinit_tls_service_v1()
+{
+    gu::deinit_tls_service_v1();
+}
+
+template <typename M>
+static wsrep_status_t
+get_membership(wsrep_t* const           gh,
+               wsrep_allocator_cb const alloc,
+               M**                      memb)
+{
+    assert(gh != 0);
+    assert(gh->ctx != 0);
+
+    REPL_CLASS * repl(reinterpret_cast< REPL_CLASS * >(gh->ctx));
+
+    try
+    {
+        return repl->get_membership(alloc, memb);
+    }
+    catch (std::exception& e)
+    {
+        log_error << e.what();
+        return WSREP_NODE_FAIL;
+    }
+}
+
+static wsrep_status_t
+get_membership_v1(wsrep_t* const            gh,
+                  wsrep_allocator_cb const  alloc,
+                  struct wsrep_membership** memb)
+{
+    return get_membership(gh, alloc, memb);
+}
+
+static wsrep_status_t
+get_membership_v2(wsrep_t* const            gh,
+                  wsrep_allocator_cb const  alloc,
+                  struct wsrep_membership_v2** memb)
+{
+    return get_membership(gh, alloc, memb);
+}
+
+extern "C"
+wsrep_status_t wsrep_init_membership_service_v1(
+    struct wsrep_membership_service_v1 *membership_service)
+{
+    membership_service->get_membership = get_membership_v1;
+    return WSREP_OK;
+}
+
+extern "C" void wsrep_deinit_membership_service_v1()
+{
+}
+
+extern "C"
+wsrep_status_t wsrep_init_membership_service_v2(
+    struct wsrep_membership_service_v2 *membership_service)
+{
+    membership_service->get_membership = get_membership_v2;
+    return WSREP_OK;
+}
+
+extern "C" void wsrep_deinit_membership_service_v2()
+{
 }
 
 extern "C"
@@ -1845,6 +1963,83 @@ extern "C" void wsrep_deinit_config_service_v2()
     gu::Config::enable_deprecation_check();
 }
 
+extern "C"
+wsrep_status_t
+    wsrep_ps_fetch_cluster_info_v2 (wsrep_t*            gh,
+                                    wsrep_node_info_t** nodes,
+                                    uint32_t*           size,
+                                    int32_t*            my_index,
+                                    uint32_t            max_version)
+{
+    assert(gh != 0);
+    assert(gh->ctx != 0);
+
+    REPL_CLASS* repl(reinterpret_cast< REPL_CLASS * >(gh->ctx));
+
+    return repl->fetch_pfs_info(nodes, size, my_index, max_version);
+}
+
+extern "C"
+void wsrep_ps_free_cluster_info (wsrep_t* gh,
+                                 wsrep_node_info_t* nodes)
+{
+    assert(gh != 0);
+    assert(gh->ctx != 0);
+
+    REPL_CLASS* repl(reinterpret_cast< REPL_CLASS * >(gh->ctx));
+
+    repl->free_pfs_info(nodes);
+}
+
+extern "C"
+wsrep_status_t
+    wsrep_ps_fetch_node_stat_v2 (wsrep_t*            gh,
+                                 wsrep_node_stat_t** nodes,
+                                 uint32_t*           size,
+                                 int32_t*            my_index,
+                                 uint32_t            max_version)
+{
+    assert(gh != 0);
+    assert(gh->ctx != 0);
+
+    REPL_CLASS* repl(reinterpret_cast< REPL_CLASS * >(gh->ctx));
+
+    return repl->fetch_pfs_stat(nodes, size, my_index, max_version);
+}
+
+extern "C"
+void wsrep_ps_free_node_stat (wsrep_t* gh,
+                              wsrep_node_stat_t* nodes)
+{
+    assert(gh != 0);
+    assert(gh->ctx != 0);
+
+    REPL_CLASS* repl(reinterpret_cast< REPL_CLASS * >(gh->ctx));
+
+    repl->free_pfs_stat(nodes);
+}
+
+static wsrep_status_t
+get_membership(wsrep_t* const            gh,
+               wsrep_allocator_cb const  alloc,
+               struct wsrep_membership** memb)
+{
+    assert(gh != 0);
+    assert(gh->ctx != 0);
+
+    REPL_CLASS * repl(reinterpret_cast< REPL_CLASS * >(gh->ctx));
+
+    try
+    {
+        return repl->get_membership(alloc, memb);
+    }
+    catch (std::exception& e)
+    {
+        log_error << e.what();
+        return WSREP_NODE_FAIL;
+    }
+}
+
 /*
  * This function may be called from signal handler, so make sure that
  * only 'safe' system calls and library functions are used. See
@@ -1861,3 +2056,5 @@ wsrep_node_isolation_mode_set_v1(enum wsrep_node_isolation_mode mode)
     gu::gu_asio_node_isolation_mode = mode;
     return WSREP_NODE_ISOLATION_SUCCESS;
 }
+
+

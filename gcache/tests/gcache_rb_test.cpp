@@ -17,13 +17,12 @@ using namespace gcache;
 
 static gu::UUID    const GID(NULL, 0);
 static std::string const RB_NAME("rb_test");
-static size_t      const BH_SIZE(sizeof(gcache::BufferHeader));
 
 typedef MemOps::size_type size_type;
 
 static size_type ALLOC_SIZE(size_type s)
 {
-    return MemOps::align_size(s + BH_SIZE);
+    return gcache::RingBuffer::aligned_size(BH_size(s));
 }
 
 START_TEST(test1)
@@ -46,7 +45,7 @@ START_TEST(test1)
         ck_abort_msg("%s", os.str().c_str());
     }
 
-    void* buf1 = rb.malloc (MemOps::align_size(rb_size/2 + 1));
+    void* buf1 = rb.malloc (rb_size/2 + 1);
     ck_assert(NULL == buf1); // > 1/2 size
 
     buf1 = rb.malloc (ALLOC_SIZE(1));

@@ -30,9 +30,9 @@ namespace gu
 
     public:
 
-        Cond () : cond(), ref_count(0)
+        Cond (const wsrep_cond_key_t* key) : cond(), ref_count(0)
         {
-            gu_cond_init (&cond, NULL);
+            gu_cond_init (key, &cond);
         }
 
         ~Cond ()

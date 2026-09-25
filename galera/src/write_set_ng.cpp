@@ -1,5 +1,5 @@
 //
-// Copyright (C) 2013-2017 Codership Oy <info@codership.com>
+// Copyright (C) 2013-2019 Codership Oy <info@codership.com>
 //
 
 
@@ -8,6 +8,7 @@
 #include <gu_time.h>
 #include <gu_macros.hpp>
 #include <gu_utils.hpp>
+#include <gu_thread_keys.hpp>
 #ifndef NDEBUG
 #include <gcache_memops.hpp> // gcache::MemOps::ALIGNMENT
 #endif
@@ -220,8 +221,11 @@ WriteSetIn::init (ssize_t const st)
         if (size_ >= st)
         {
             /* buffer too big, start checksumming in background */
-            int const err(gu_thread_create (&check_thr_id_, NULL,
-                                            checksum_thread, this));
+            int const err(gu_thread_create (
+                              gu::get_thread_key(
+                                  gu::GU_THREAD_KEY_WRITE_SET_CHECK),
+                              &check_thr_id_,
+                              checksum_thread, this));
 
             if (gu_likely(0 == err))
             {

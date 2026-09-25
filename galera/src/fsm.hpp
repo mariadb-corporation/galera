@@ -7,6 +7,8 @@
 
 #include "gu_unordered.hpp"
 #include "gu_throw.hpp"
+#include "gu_logger.hpp"
+
 #include <list>
 #include <vector>
 

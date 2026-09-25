@@ -97,6 +97,7 @@ add_library(galerautilsxx STATIC
   gu_asio_stream_react.cpp
   gu_debug_sync.cpp
   gu_thread.cpp
+  gu_thread_keys.cpp
   gu_uuid.cpp
   )
 

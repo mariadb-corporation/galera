@@ -41,13 +41,13 @@ namespace gcache
 
         void repossess(BufferHeader* bh)
         {
-            assert(bh->size > 0);
+            assert(bh->size >= sizeof(BufferHeader));
             assert(bh->seqno_g != SEQNO_NONE);
             assert(bh->store == BUFFER_IN_RB);
             assert(bh->ctx == reinterpret_cast<BH_ctx_t>(this));
             assert(BH_is_released(bh)); // will be marked unreleased by caller
 
-            size_used_ += bh->size;
+            size_used_ += aligned_size(bh->size);
             assert(size_used_ <= size_cache_);
         }
 
@@ -56,9 +56,11 @@ namespace gcache
             assert (BH_is_released(bh));
             assert (BUFFER_IN_RB == bh->store);
 
-            size_free_ += bh->size;
+            size_free_ += aligned_size(bh->size);
             assert (size_free_ <= size_cache_);
 
+            /* so we know that the buffer is no longer in the map and can be
+             * overwritten */
             bh->seqno_g = SEQNO_ILL;
         }
 
@@ -141,6 +143,13 @@ namespace gcache
         }
 #endif
 
+        static const size_type ALIGNEMENT = GU_MIN_ALIGNMENT;
+
+        static inline size_type aligned_size(size_type s)
+        {
+            return GU_ALIGN(s, ALIGNMENT);
+        }
+
         void dump_map() const;
 
     private:
@@ -199,6 +208,18 @@ namespace gcache
         void          recover(off_t offset, int version);
 
         void          estimate_space();
+
+        static inline size_type
+        BH_offset(const BufferHeader* bh)
+        {
+            return aligned_size(bh->size);
+        }
+
+        static inline BufferHeader*
+        BH_next(BufferHeader* bh)
+        {
+            return BH_cast(reinterpret_cast<uint8_t*>(bh) + BH_offset(bh));
+        }
 
         RingBuffer(const gcache::RingBuffer&);
         RingBuffer& operator=(const gcache::RingBuffer&);

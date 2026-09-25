@@ -96,6 +96,7 @@ namespace galera
             }
 
             gu_throw_error (EPROTO) << "Unrecognized writeset version: " << v;
+	    return VER3; // silence compiler
         }
 
         /* These flags should be fixed to wire protocol version and so

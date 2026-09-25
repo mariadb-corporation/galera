@@ -86,8 +86,8 @@ galera::ReplicatorSMM::ReplicatorSMM(const struct wsrep_init_args* args)
     protocol_version_   (-1),
     proto_max_          (gu::from_string<int>(config_.get(Param::proto_max))),
     state_              (S_CLOSED),
-    closing_mutex_      (),
-    closing_cond_       (),
+    closing_mutex_      (0),
+    closing_cond_       (0),
     closing_            (false),
     sst_state_          (SST_NONE),
     co_mode_            (CommitOrder::from_string(
@@ -117,14 +117,15 @@ galera::ReplicatorSMM::ReplicatorSMM(const struct wsrep_init_args* args)
     sst_donor_          (),
     sst_uuid_           (WSREP_UUID_UNDEFINED),
     sst_seqno_          (WSREP_SEQNO_UNDEFINED),
-    sst_mutex_          (),
-    sst_cond_           (),
+    sst_mutex_          (gu::get_mutex_key(gu::GU_MUTEX_KEY_SST)),
+    sst_cond_           (gu::get_cond_key(gu::GU_COND_KEY_SST)),
     sst_retry_sec_      (1),
     sst_received_       (false),
     sst_graceful_shutdown_ (false),
     gcache_progress_cb_ (ProgressCallback<int64_t>(WSREP_MEMBER_UNDEFINED,
                                                    WSREP_MEMBER_UNDEFINED)),
-    gcache_             (&gcache_progress_cb_, config_, config_.get(BASE_DIR)),
+    gcache_             (&gcache_progress_cb_, config_, config_.get(BASE_DIR),
+                         args->encrypt_cb, args->app_ctx),
     joined_progress_cb_ (ProgressCallback<gcs_seqno_t>(WSREP_MEMBER_JOINED,
                                                        WSREP_MEMBER_SYNCED)),
     gcs_                (config_, gcache_, &joined_progress_cb_,
@@ -139,11 +140,15 @@ galera::ReplicatorSMM::ReplicatorSMM(const struct wsrep_init_args* args)
                          args->node_address, &ist_progress_cb_),
     ist_senders_        (gcache_),
     wsdb_               (),
-    cert_               (config_, &service_thd_),
+    cert_               (config_, gcache_, &service_thd_),
     pending_cert_queue_ (gcache_),
-    local_monitor_      (),
-    apply_monitor_      (),
-    commit_monitor_     (),
+    write_set_waiters_  (),
+    local_monitor_      (gu::GU_MUTEX_KEY_LOCAL_MONITOR,
+                         gu::GU_COND_KEY_LOCAL_MONITOR),
+    apply_monitor_      (gu::GU_MUTEX_KEY_APPLY_MONITOR,
+                         gu::GU_COND_KEY_APPLY_MONITOR),
+    commit_monitor_     (gu::GU_MUTEX_KEY_COMMIT_MONITOR,
+                         gu::GU_COND_KEY_COMMIT_MONITOR),
     causal_read_timeout_(config_.get(Param::causal_read_timeout)),
     receivers_          (),
     replicated_         (),
@@ -159,7 +164,7 @@ galera::ReplicatorSMM::ReplicatorSMM(const struct wsrep_init_args* args)
     causal_reads_       (),
     preordered_id_      (),
     incoming_list_      (""),
-    incoming_mutex_     (),
+    incoming_mutex_     (0),
     wsrep_stats_        ()
 {
     // @todo add guards (and perhaps actions)
@@ -274,6 +279,7 @@ void galera::ReplicatorSMM::shift_to_CLOSED()
     }
 
     closing_cond_.broadcast();
+    write_set_waiters_.interrupt_waiters();
 }
 
 void galera::ReplicatorSMM::wait_for_CLOSED(gu::Lock& lock)
@@ -735,7 +741,7 @@ wsrep_status_t galera::ReplicatorSMM::replicate(TrxHandleMaster& trx,
     TrxHandleSlavePtr ts(TrxHandleSlave::New(true, slave_pool_),
                          TrxHandleSlaveDeleter());
 
-    gu_trace(ts->unserialize<true>(act));
+    gu_trace(ts->unserialize<true>(gcache_, act));
     ts->set_local(true);
 
     ts->update_stats(keys_count_, keys_bytes_, data_bytes_, unrd_bytes_);
@@ -1127,6 +1133,25 @@ wsrep_status_t galera::ReplicatorSMM::replay_trx(TrxHandleMaster& trx,
     log_debug << "replaying failed for trx " << trx;
     assert(trx.state() == TrxHandle::S_ABORTING);
 
+    return retval;
+}
+
+wsrep_status_t galera::ReplicatorSMM::terminate_trx(TrxHandleMaster& trx,
+                                                    wsrep_trx_meta_t* meta)
+{
+    auto waiter(
+        write_set_waiters_.register_waiter(meta->stid.node, meta->stid.trx));
+    wsrep_status_t retval(send(trx, meta));
+    if (retval == WSREP_OK)
+    {
+        if (waiter->wait())
+        {
+            // wait was interrupted by shutdown,
+            // or non-prim configuration
+            retval = WSREP_CONN_FAIL;
+        }
+    }
+    write_set_waiters_.unregister_waiter(meta->stid.node, meta->stid.trx);
     return retval;
 }
 
@@ -2004,6 +2029,7 @@ galera::ReplicatorSMM::get_real_ts_with_gcache_buffer(
         if (size > 0)
         {
             gu_trace(ret->unserialize<false>(
+                         gcache_,
                          gcs_action{ts->global_seqno(), WSREP_SEQNO_UNDEFINED,
                                  buf, int32_t(size), GCS_ACT_WRITESET}));
             ret->set_local(false);
@@ -2126,6 +2152,11 @@ void galera::ReplicatorSMM::process_trx(void* recv_ctx,
             }
 
             gu_trace(apply_trx(recv_ctx, ts));
+
+            if (ts.is_streaming_end())
+            {
+                write_set_waiters_.signal(ts.source_id(), ts.trx_id());
+            }
         }
         catch (std::exception& e)
         {
@@ -2451,11 +2482,10 @@ galera::ReplicatorSMM::submit_view_info(void*                    recv_ctx,
 
 void
 galera::ReplicatorSMM::process_conf_change(void*                    recv_ctx,
+                                           const gcs_act_cchange&   conf,
                                            const struct gcs_action& cc)
 {
     assert(cc.seqno_l > 0); // Must not be from IST
-
-    gcs_act_cchange const conf(cc.buf, cc.size);
 
     LocalOrder lo(cc.seqno_l);
     local_monitor_.enter(lo);
@@ -2555,6 +2585,8 @@ void galera::ReplicatorSMM::process_non_prim_conf_change(
             state_.shift_to(S_CONNECTED);
         }
     }
+
+    write_set_waiters_.interrupt_waiters();
 }
 
 static void validate_local_prim_view_info(const wsrep_view_info_t* view_info,
@@ -3531,4 +3563,36 @@ galera::ReplicatorSMM::abort()
     log_info << "ReplicatorSMM::abort()";
     gcs_.close();
     gu_abort();
+}
+
+template <typename M>
+wsrep_status_t
+galera::ReplicatorSMM::get_membership_tmpl(wsrep_allocator_cb const alloc,
+                                           M**                      memb) const
+{
+    gu::Lock lock(closing_mutex_);
+
+    if (state_() > S_CLOSED)
+    {
+        gcs_.get_membership(alloc, memb);
+        return WSREP_OK;
+    }
+    else
+    {
+        gu_throw_error(EBADFD) << "Replicator connection closed";
+    }
+}
+
+wsrep_status_t
+galera::ReplicatorSMM::get_membership(wsrep_allocator_cb const  alloc,
+                                      struct wsrep_membership** memb) const
+{
+    return get_membership_tmpl(alloc, memb);
+}
+
+wsrep_status_t
+galera::ReplicatorSMM::get_membership(wsrep_allocator_cb const  alloc,
+                                      struct wsrep_membership_v2** memb) const
+{
+    return get_membership_tmpl(alloc, memb);
 }

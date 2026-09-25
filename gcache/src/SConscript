@@ -20,7 +20,12 @@ gcache_sources = Split ('''
         GCache.cpp
 ''')
 
-gcache_env.StaticLibrary('gcache', gcache_sources)
+# functionality for unit tests
+test_sources = Split ('''
+        gcache_test_encryption.cpp
+''')
+
+gcache_env.StaticLibrary('gcache', gcache_sources + test_sources)
 
 test_env = gcache_env.Clone()
 

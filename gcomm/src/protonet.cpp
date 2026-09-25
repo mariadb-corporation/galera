@@ -10,6 +10,7 @@
 
 #include "gcomm/util.hpp"
 #include "gcomm/conf.hpp"
+#include "defaults.hpp"
 
 void gcomm::Protonet::insert(Protostack* pstack)
 {
@@ -61,7 +62,7 @@ bool gcomm::Protonet::set_param(const std::string& key, const std::string& val,
 
 gcomm::Protonet* gcomm::Protonet::create(gu::Config& conf)
 {
-    const std::string backend(conf.get(Conf::ProtonetBackend));
+    const std::string backend = Defaults::ProtonetBackend;
     const int version(conf.get<int>(Conf::ProtonetVersion));
 
     if (version > max_version_)

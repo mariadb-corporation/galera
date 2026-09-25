@@ -1,4 +1,4 @@
-/* Copyright (C) 2013 Codership Oy <info@codership.com> */
+/* Copyright (C) 2013-2019 Codership Oy <info@codership.com> */
 /*!
  * @file common RecordSet implementation
  *
@@ -358,6 +358,9 @@ RecordSet::RecordSet (Version ver, CheckType const ct)
     assert(uint(check_type_) < VER2_SHORT_FLAG);
 }
 
+/* make heap allocation limit 4G - 1 so that no Galera writeset spills to disk
+ * (in plaintext) */
+static Allocator::heap_size_type const max_heap(0xffffffff);
 
 RecordSetOutBase::RecordSetOutBase (byte_t*                 reserved,
                                     size_t                  reserved_size,
@@ -373,7 +376,7 @@ RecordSetOutBase::RecordSetOutBase (byte_t*                 reserved,
 #ifdef GU_RSET_CHECK_SIZE
     max_size_   (max_size),
 #endif
-    alloc_      (base_name, reserved, reserved_size),
+    alloc_      (base_name, reserved, reserved_size, max_heap),
     check_      (),
     bufs_       (),
     prev_stored_(true)

@@ -33,6 +33,31 @@ using namespace std::rel_ops;
     else log_info << self_string() << ": "
 
 
+// Whether the option was set explicitly by the user. Provider options may
+// arrive via the gu::Config or as gcomm URI query options, so check both
+// (defaults live in neither).
+static bool param_is_set(const gu::Config& conf, const gu::URI& uri,
+                         const std::string& key)
+{
+    try
+    {
+        (void)conf.get(key); // if get() returns, the option was explicitly set
+        return true;
+    }
+    catch (gu::NotSet&)   { } // registered but not set -> using default
+    catch (gu::NotFound&) { } // not registered at all  -> using default
+
+    try
+    {
+        (void)uri.get_option(key);
+        return true;
+    }
+    catch (gu::NotFound&) { } // not present among the URI options
+
+    return false;
+}
+
+
 gcomm::evs::Proto::Proto(gu::Config&    conf,
                          const UUID&    my_uuid,
                          SegmentId      segment,
@@ -91,6 +116,9 @@ gcomm::evs::Proto::Proto(gu::Config&    conf,
                     gu::from_string<gu::datetime::Period>(
                         Defaults::EvsSuspectTimeoutMin),
                     gu::datetime::Period::max())),
+    // Upper bound is the keepalive period, but that is only known once
+    // retrans_period_ below has been initialized, so the cap is applied
+    // in the constructor body, see sanitize_inactive_check_period().
     inactive_check_period_(
         check_range(Conf::EvsInactiveCheckPeriod,
                     param<gu::datetime::Period>(
@@ -188,6 +216,15 @@ gcomm::evs::Proto::Proto(gu::Config&    conf,
 {
     log_info << "EVS version " << version_;
 
+    // By now the whole supplied configuration has been processed, so
+    // all binding values are known and the derived limits
+    // below can be enforced. Warn only if an offending value was set
+    // explicitly by the user - adjusting a default is not worth a warning.
+    (void)sanitize_inactive_check_period(
+        param_is_set(conf, uri, Conf::EvsInactiveCheckPeriod));
+    (void)sanitize_install_timeout(
+        param_is_set(conf, uri, Conf::EvsInstallTimeout));
+
     conf.set(Conf::EvsVersion, gu::to_string(version_));
     conf.set(Conf::EvsViewForgetTimeout, gu::to_string(view_forget_timeout_));
     conf.set(Conf::EvsSuspectTimeout, gu::to_string(suspect_timeout_));
@@ -241,7 +278,82 @@ gcomm::evs::Proto::~Proto()
 
 
 bool
-gcomm::evs::Proto::set_param(const std::string& key, const std::string& val, 
+gcomm::evs::Proto::sanitize_inactive_check_period(bool warn_on_adjust)
+{
+    // Node liveness is inferred from the keepalives sent every
+    // evs.keepalive_period, so checking for inactivity less often than that
+    // only delays detection without ever looking at fresher information.
+    // Hence the check period is capped at the keepalive period.
+    if (inactive_check_period_ <= retrans_period_) return false;
+
+    if (warn_on_adjust)
+    {
+        log_warn << "Ignoring configured " << Conf::EvsInactiveCheckPeriod
+                 << "=" << inactive_check_period_ << ": it must not exceed "
+                 << Conf::EvsKeepalivePeriod << "=" << retrans_period_
+                 << ". Using " << retrans_period_ << " instead.";
+    }
+
+    inactive_check_period_ = retrans_period_;
+    conf_.set(Conf::EvsInactiveCheckPeriod,
+              gu::to_string(inactive_check_period_));
+
+    return true;
+}
+
+
+bool
+gcomm::evs::Proto::sanitize_install_timeout(bool warn_on_adjust)
+{
+    // The intended ordering is suspect_timeout < install_timeout <
+    // inactive_timeout with at least one retransmission period
+    // (evs.keepalive_period) between neighbours. In particular install_timeout
+    // must never be below suspect_timeout: otherwise a view install is
+    // abandoned before a silent node can even be suspected, which can drive an
+    // otherwise healthy majority to non-primary. The rule is not so strict
+    // with respect to inactive timeout. The ordering cannot be
+    // enforced strictly (old configurations must still start), so an
+    // install_timeout that violates it is replaced with the midpoint of the
+    // suspect and inactive timeouts. See MDEV-38920.
+    bool adjusted(false);
+
+    const gu::datetime::Period install_min(suspect_timeout_ + retrans_period_);
+    const gu::datetime::Period install_max(inactive_timeout_); // relax for inactive
+
+    if (install_timeout_ < install_min || install_max < install_timeout_)
+    {
+        const gu::datetime::Period new_install(
+            (suspect_timeout_ + inactive_timeout_) / 2);
+        if (warn_on_adjust)
+        {
+            log_warn << "Ignoring configured " << Conf::EvsInstallTimeout
+                     << "=" << install_timeout_ << ": it must be between "
+                     << Conf::EvsSuspectTimeout << "=" << suspect_timeout_
+                     << " and " << Conf::EvsInactiveTimeout << "="
+                     << inactive_timeout_ << " (with a "
+                     << Conf::EvsKeepalivePeriod << "=" << retrans_period_
+                     << " margin). Using " << new_install << " instead.";
+        }
+        install_timeout_ = new_install;
+        conf_.set(Conf::EvsInstallTimeout, gu::to_string(install_timeout_));
+        adjusted = true;
+    }
+
+    if (inactive_timeout_ - suspect_timeout_ < retrans_period_ * 2)
+    {
+        log_warn << "EVS timeout window is too narrow: "
+                 << Conf::EvsInactiveTimeout << "=" << inactive_timeout_
+                 << " minus " << Conf::EvsSuspectTimeout << "="
+                 << suspect_timeout_ << " is less than 2*"
+                 << Conf::EvsKeepalivePeriod << "=" << retrans_period_;
+    }
+
+    return adjusted;
+}
+
+
+bool
+gcomm::evs::Proto::set_param(const std::string& key, const std::string& val,
                             Protolay::sync_param_cb_t& sync_param_cb)
 {
     if (key == gcomm::Conf::EvsVersion)
@@ -314,6 +426,8 @@ gcomm::evs::Proto::set_param(const std::string& key, const std::string& val,
             gu::datetime::Period::max());
         conf_.set(Conf::EvsSuspectTimeout, gu::to_string(suspect_timeout_));
         reset_timer(T_INACTIVITY);
+        // suspect_timeout changed: re-validate install_timeout (MDEV-38920)
+        if (sanitize_install_timeout(true)) reset_timer(T_INSTALL);
         return true;
     }
     else if (key == Conf::EvsInactiveTimeout)
@@ -325,6 +439,8 @@ gcomm::evs::Proto::set_param(const std::string& key, const std::string& val,
             gu::datetime::Period::max());
         conf_.set(Conf::EvsInactiveTimeout, gu::to_string(inactive_timeout_));
         reset_timer(T_INACTIVITY);
+        // inactive_timeout changed: re-validate install_timeout (MDEV-38920)
+        if (sanitize_install_timeout(true)) reset_timer(T_INSTALL);
         return true;
     }
     else if (key == Conf::EvsKeepalivePeriod)
@@ -336,6 +452,10 @@ gcomm::evs::Proto::set_param(const std::string& key, const std::string& val,
             gu::datetime::Period::max());
         conf_.set(Conf::EvsKeepalivePeriod, gu::to_string(retrans_period_));
         reset_timer(T_RETRANS);
+        // keepalive/retrans period changed: re-validate the values bounded by it
+        // NOTE: ideally we should reset inactive_check_period too,
+        // but it is not dynamic, keeping it as is.
+        if (sanitize_install_timeout(true)) reset_timer(T_INSTALL);
         return true;
     }
     else if (key == Conf::EvsCausalKeepalivePeriod)
@@ -368,6 +488,8 @@ gcomm::evs::Proto::set_param(const std::string& key, const std::string& val,
             gu::from_string<gu::datetime::Period>(val),
             retrans_period_*2, inactive_timeout_ + 1);
         conf_.set(Conf::EvsInstallTimeout, gu::to_string(install_timeout_));
+        // re-validate the just-set install_timeout (MDEV-38920)
+        (void)sanitize_install_timeout(true);
         reset_timer(T_INSTALL);
         return true;
     }

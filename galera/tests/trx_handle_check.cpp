@@ -7,6 +7,8 @@
 
 #include <vector>
 
+#include "galera_test_env.hpp"
+
 #include <check.h>
 
 using namespace std;
@@ -152,8 +154,10 @@ START_TEST(test_states_slave)
 }
 END_TEST
 
-START_TEST(test_serialization)
+static void
+serialization(bool const enc)
 {
+    TestEnv env("trx_serialization", enc);
     TrxHandleMaster::Pool lp(4096, 16, "serialization_lp");
     TrxHandleSlave::Pool  sp(sizeof(TrxHandleSlave), 16, "serialization_sp");
 
@@ -175,10 +179,21 @@ START_TEST(test_serialization)
                                TrxHandleSlaveDeleter());
         gcs_action const act =
             { 1, 2, buf.data(), int(buf.size()), GCS_ACT_WRITESET};
-        ck_assert(txs1->unserialize<true>(act) > 0);
+        ck_assert((txs1->unserialize<true,false>(env.gcache(), act)) > 0);
         ck_assert(txs1->global_seqno() == act.seqno_g);
         ck_assert(txs1->local_seqno()  == act.seqno_l);
     }
+}
+
+START_TEST(test_serialization)
+{
+    serialization(false);
+}
+END_TEST
+
+START_TEST(test_serializationE)
+{
+    serialization(true);
 }
 END_TEST
 
@@ -204,8 +219,10 @@ apply_cb(
     return WSREP_CB_SUCCESS;
 }
 
-START_TEST(test_streaming)
+static void
+streaming(bool const enc)
 {
+    TestEnv env("trx_streaming", enc);
     TrxHandleMaster::Pool lp(4096, 16, "streaming_lp");
     TrxHandleSlave::Pool  sp(sizeof(TrxHandleSlave), 16, "streaming_sp");
 
@@ -242,7 +259,7 @@ START_TEST(test_streaming)
                              TrxHandleSlaveDeleter());
         gcs_action const act =
             { 1, 2, buf.data(), int(buf.size()), GCS_ACT_WRITESET};
-        ck_assert(ts->unserialize<true>(act) > 0);
+        ck_assert((ts->unserialize<true,false>(env.gcache(), act)) > 0);
         ck_assert(ts->flags() & TrxHandle::F_BEGIN);
         ck_assert(!(ts->flags() & TrxHandle::F_COMMIT));
         trx->add_replicated(ts);
@@ -265,7 +282,7 @@ START_TEST(test_streaming)
                              TrxHandleSlaveDeleter());
         gcs_action const act =
             { 2, 3, buf.data(), int(buf.size()), GCS_ACT_WRITESET};
-        ck_assert(ts->unserialize<true>(act) > 0);
+        ck_assert((ts->unserialize<true,false>(env.gcache(), act)) > 0);
         ck_assert(!(ts->flags() & TrxHandle::F_BEGIN));
         ck_assert(!(ts->flags() & TrxHandle::F_COMMIT));
         trx->add_replicated(ts);
@@ -289,7 +306,7 @@ START_TEST(test_streaming)
                              TrxHandleSlaveDeleter());
         gcs_action const act =
             { 3, 4, buf.data(), int(buf.size()), GCS_ACT_WRITESET};
-        ck_assert(ts->unserialize<true>(act) > 0);
+        ck_assert((ts->unserialize<true,false>(env.gcache(), act)) > 0);
         ck_assert(!(ts->flags() & TrxHandle::F_BEGIN));
         ck_assert(ts->flags() & TrxHandle::F_COMMIT);
         trx->add_replicated(ts);
@@ -299,6 +316,17 @@ START_TEST(test_streaming)
     }
 
     ck_assert(res == src);
+}
+
+START_TEST(test_streaming)
+{
+    streaming(false);
+}
+END_TEST
+
+START_TEST(test_streamingE)
+{
+    streaming(true);
 }
 END_TEST
 
@@ -318,10 +346,12 @@ Suite* trx_handle_suite()
 
     tc = tcase_create("test_serialization");
     tcase_add_test(tc, test_serialization);
+    tcase_add_test(tc, test_serializationE);
     suite_add_tcase(s, tc);
 
     tc = tcase_create("test_streaming");
     tcase_add_test(tc, test_streaming);
+    tcase_add_test(tc, test_streamingE);
     suite_add_tcase(s, tc);
 
     return s;

@@ -6,6 +6,19 @@ export DEB_BUILD_MAINT_OPTIONS = hardening=+all
 DPKG_EXPORT_BUILDFLAGS = 1
 # Include all defaults, includes buildflags.mk
 include /usr/share/dpkg/default.mk
+# The following is not available on Debian6
+# Galera Version
+ifneq (,$(filter version=%,$(DEB_BUILD_OPTIONS)))
+       VERSION = $(filter version=%,$(DEB_BUILD_OPTIONS))
+       SCONS_ARGS += $(VERSION)
+endif
+
+# Galera revision number
+ifneq (,$(filter revno=%,$(DEB_BUILD_OPTIONS)))
+       REVNO = $(filter revno=%,$(DEB_BUILD_OPTIONS))
+       SCONS_ARGS += $(REVNO)
+endif
+
 
 # Set unit test timeout multiplier to make slow tests
 # pass on loaded builders.
@@ -18,9 +31,18 @@ override_dh_auto_test:
 override_dh_installinit-arch:
 	dh_installinit -n --name=garb -- defaults 18 22
 
+override_dh_strip:
+	dh_strip -pgalera-4 --dbg-package=galera-4-dbg
+	dh_strip -pgalera-arbitrator-4 --dbg-package=galera-arbitrator-4-dbg
+
 override_dh_installsystemd:
 	dh_installsystemd --name=garb
+
+override_dh_shlibdeps:
+	dh_shlibdeps --dpkg-shlibdeps-params=--ignore-missing-info
 
 %:
 
 	dh $@ --list-missing
+
+.PHONY: override_dh_strip

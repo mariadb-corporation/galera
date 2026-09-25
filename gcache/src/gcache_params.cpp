@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2009-2018 Codership Oy <info@codership.com>
+ * Copyright (C) 2009-2022 Codership Oy <info@codership.com>
  */
 
 #include "GCache.hpp"
@@ -16,6 +16,8 @@ static const std::string GCACHE_PARAMS_PAGE_SIZE  ("gcache.page_size");
 static const std::string GCACHE_DEFAULT_PAGE_SIZE (GCACHE_DEFAULT_RB_SIZE);
 static const std::string GCACHE_PARAMS_KEEP_PAGES_SIZE("gcache.keep_pages_size");
 static const std::string GCACHE_DEFAULT_KEEP_PAGES_SIZE("0");
+static const std::string GCACHE_PARAMS_KEEP_PLAINTEXT_SIZE
+    ("gcache.keep_plaintext_size");
 #ifndef NDEBUG
 static const std::string GCACHE_PARAMS_DEBUG      ("gcache.debug");
 static const std::string GCACHE_DEFAULT_DEBUG     ("0");
@@ -40,6 +42,8 @@ gcache::GCache::Params::register_params(gu::Config& cfg)
     cfg.add(GCACHE_PARAMS_PAGE_SIZE, GCACHE_DEFAULT_PAGE_SIZE,
             gu::Config::Flag::type_integer);
     cfg.add(GCACHE_PARAMS_KEEP_PAGES_SIZE, GCACHE_DEFAULT_KEEP_PAGES_SIZE,
+            gu::Config::Flag::type_integer);
+    cfg.add(GCACHE_PARAMS_KEEP_PLAINTEXT_SIZE,
             gu::Config::Flag::type_integer);
 #ifndef NDEBUG
     cfg.add(GCACHE_PARAMS_DEBUG,           GCACHE_DEFAULT_DEBUG);
@@ -80,17 +84,36 @@ gcache::GCache::Params::Params (gu::Config& cfg, const std::string& data_dir)
     rb_size_  (cfg.get<size_t>(GCACHE_PARAMS_RB_SIZE)),
     page_size_(cfg.get<size_t>(GCACHE_PARAMS_PAGE_SIZE)),
     keep_pages_size_(cfg.get<size_t>(GCACHE_PARAMS_KEEP_PAGES_SIZE)),
+    keep_plaintext_size_(page_size_), /* default to page_size_ */
 #ifndef NDEBUG
     debug_    (cfg.get<int>(GCACHE_PARAMS_DEBUG)),
 #else
     debug_    (0),
 #endif
     recover_  (cfg.get<bool>(GCACHE_PARAMS_RECOVER))
-{}
+{
+    try
+    {
+        keep_plaintext_size_ = cfg.get<size_t>
+            (GCACHE_PARAMS_KEEP_PLAINTEXT_SIZE);
+    }
+    catch (gu::NotSet& e)
+    {
+        assert(page_size_ == keep_plaintext_size_);
+        /* update config to reflect the effective value */
+        cfg.set<size_t>(GCACHE_PARAMS_KEEP_PLAINTEXT_SIZE,
+                        keep_plaintext_size_);
+    }
+}
 
 void
 gcache::GCache::param_set (const std::string& key, const std::string& val)
 {
+    if (params.debug())
+    {
+        log_info << "GCache: setting " << key << " to " << val;
+    }
+
     if (key == GCACHE_PARAMS_RB_NAME)
     {
         gu_throw_error(EPERM) << "Can't change ring buffer name in runtime.";
@@ -138,6 +161,18 @@ gcache::GCache::param_set (const std::string& key, const std::string& val)
         config.set<size_t>(key, tmp_size);
         params.keep_pages_size(tmp_size);
         ps.set_keep_size(params.keep_pages_size());
+    }
+    else if (key == GCACHE_PARAMS_KEEP_PLAINTEXT_SIZE)
+    {
+        size_t tmp_size = gu::Config::from_config<size_t>(val);
+
+        gu::Lock lock(mtx);
+        /* locking here serves two purposes: ensures atomic setting of config
+         * and params.ram_size and syncs with malloc() method */
+
+        config.set<size_t>(key, tmp_size);
+        params.keep_plaintext_size(tmp_size);
+        ps.set_keep_plaintext_size(params.keep_plaintext_size());
     }
     else if (key == GCACHE_PARAMS_RECOVER)
     {

@@ -48,6 +48,7 @@
 #include "gu_config.hpp"
 
 #include "gcs_test_utils.hpp"
+#include <gcache_test_encryption.hpp>
 #include "gcs_core_test.hpp" // must be included last
 
 START_TEST(gcs_code_msg)
@@ -169,7 +170,7 @@ core_recv_thread (void* arg)
 // args: action_t object
 static inline bool CORE_RECV_START(action_t* act)
 {
-    return (0 != gu_thread_create (&act->thread, NULL,
+    return (0 != gu_thread_create (NULL, &act->thread,
                                    core_recv_thread, act));
 }
 
@@ -179,6 +180,14 @@ static bool COMMON_RECV_CHECKS(action_t*      act,
                                gcs_act_type_t type,
                                gcs_seqno_t*   seqno)
 {
+    bool const act_in_gcache(GCS_ACT_WRITESET  == act->type ||
+                             GCS_ACT_STATE_REQ == act->type);
+    // GCS_ACT_CCHANGE will be handled in core_test_check_conf() that shall
+    // follow, so it can't be freed here.
+
+    const void* const out_ptx(act->out && act_in_gcache ?
+                              Cache->get_ro_plaintext(act->out) : act->out);
+
     FAIL_IF (size != UNKNOWN_SIZE && size != act->size,
              "gcs_core_recv(): expected size %d, returned %zd (%s)",
              size, act->size, strerror (-act->size));
@@ -187,7 +196,11 @@ static bool COMMON_RECV_CHECKS(action_t*      act,
     FAIL_IF (act->size > 0 && act->out == NULL,
              "null buffer received with positive size: %zu", act->size);
 
-    if (act->type == GCS_ACT_STATE_REQ) return false;
+    if (act->type == GCS_ACT_STATE_REQ)
+    {
+        Cache->free(act->out);
+        return false;
+    }
 
     // action is ordered only if it is of type GCS_ACT_WRITESET or
     // GCS_ACT_CCHANGE and not an error
@@ -217,22 +230,25 @@ static bool COMMON_RECV_CHECKS(action_t*      act,
     }
 
     if (NULL != buf) {
+
         if (GCS_ACT_WRITESET == act->type) {
             // local action buffer should not be copied
-            ck_assert_msg(act->local == act->in,
-                          "Received buffer ptr is not the same as sent: "
-                          "%p != %p", act->in, act->local);
-            ck_assert_msg(!memcmp(buf, act->out, act->size),
-                          "Received buffer contents is not the same as sent: "
-                          "'%s' != '%s'", buf, (char*)act->out);
+            FAIL_IF (act->local != act->in,
+                     "Received buffer ptr is not the same as sent: %p != %p",
+                     act->in, act->local);
+            FAIL_IF (memcmp (buf, out_ptx, act->size),
+                     "Received buffer contents is not the same as sent: "
+                     "'%s' != '%s'", buf, (char*)out_ptx);
         }
         else {
-            ck_assert_msg(act->local != buf,
-                          "Received the same buffer ptr as sent");
-            ck_assert_msg(!memcmp(buf, act->out, act->size),
-                          "Received buffer contents is not the same as sent");
+            FAIL_IF (act->local == buf,
+                     "Received the same buffer ptr as sent%s", "");
+            FAIL_IF (memcmp (buf, out_ptx, act->size),
+                     "Received buffer contents is not the same as sent%s", "");
         }
     }
+
+    if (act_in_gcache) Cache->free(act->out);
 
     return false;
 }
@@ -246,7 +262,7 @@ static bool CORE_RECV_END(action_t*      act,
 {
     {
         int ret = gu_thread_join (act->thread, NULL);
-        act->thread = (gu_thread_t)-1;
+        act->thread = GU_THREAD_INITIALIZER;
         FAIL_IF(0 != ret, "Failed to join recv thread: %d (%s)",
                 ret, strerror (ret));
     }
@@ -288,7 +304,7 @@ core_send_thread (void* arg)
 // args: action_t object
 static bool CORE_SEND_START(action_t* act)
 {
-    return (0 != gu_thread_create (&act->thread, NULL,
+    return (0 != gu_thread_create (NULL, &act->thread,
                                    core_send_thread, act));
 }
 
@@ -298,9 +314,9 @@ static bool CORE_SEND_END(action_t* act, long ret)
 {
     {
         long _ret = gu_thread_join (act->thread, NULL);
-        act->thread = (gu_thread_t)-1;
-        ck_assert_msg(0 == _ret, "Failed to join recv thread: %ld (%s)",
-                      _ret, strerror (_ret));
+        act->thread = GU_THREAD_INITIALIZER;
+        FAIL_IF (0 != _ret, "Failed to join recv thread: %ld (%s)",
+                 _ret, strerror (_ret));
     }
 
     ck_assert_msg(ret == act->seqno,
@@ -312,12 +328,12 @@ static bool CORE_SEND_END(action_t* act, long ret)
 
 // check if configuration is the one that we expected
 static long
-core_test_check_conf (const void* const conf_msg, int const conf_size,
+core_test_check_conf (void* const conf_msg, int const conf_size,
                       bool const prim, long const my_idx, size_t const memb_num)
 {
     long ret = 0;
 
-    gcs_act_cchange const conf(conf_msg, conf_size);
+    gcs_act_cchange const conf(Cache->get_ro_plaintext(conf_msg), conf_size);
 
     if ((conf.conf_id >= 0) != prim) {
         gu_error ("Expected %s conf, received %s",
@@ -330,6 +346,8 @@ core_test_check_conf (const void* const conf_msg, int const conf_size,
         gu_error ("Expected memb_num = %zd, got %zd", memb_num,conf.memb.size());
         ret = -1;
     }
+
+    Cache->free(conf_msg);
 
     return ret;
 }
@@ -359,7 +377,7 @@ core_test_set_payload_size (ssize_t s)
 // Initialises core and backend objects + some common tests
 static inline void
 core_test_init (gu::Config* config,
-                bool bootstrap = true, int const gcs_proto_ver = 1)
+                bool enc, bool bootstrap = true, int const gcs_proto_ver = 1)
 {
     long     ret;
     action_t act;
@@ -370,7 +388,17 @@ core_test_init (gu::Config* config,
 
     gcs_test::InitConfig(*config, CacheName);
 
-    Cache = new gcache::GCache(NULL, *config, ".");
+    if (enc)
+    {
+        Cache = new gcache::GCache(NULL, *config, ".", gcache_test_encrypt_cb,
+                                   NULL);
+        wsrep_enc_key_t const key = { Cache, sizeof(*Cache) };
+        Cache->set_enc_key(key);
+    }
+    else
+    {
+        Cache = new gcache::GCache(NULL, *config, ".");
+    }
 
     Core = gcs_core_create (*config,
                             reinterpret_cast<gcache_t*>(Cache),
@@ -405,7 +433,6 @@ core_test_init (gu::Config* config,
     // receive first configuration message
     ck_assert(!CORE_RECV_ACT (&act, NULL, UNKNOWN_SIZE, GCS_ACT_CCHANGE));
     ck_assert(!core_test_check_conf(act.out, act.size, bootstrap, 0, 1));
-    Cache->free(act.out);
 
     int const ver(gcs_core_proto_ver(Core));
     ck_assert_msg(ver == gcs_proto_ver,"Expected protocol version: %d, got: %d",
@@ -469,7 +496,7 @@ core_test_cleanup ()
                   ret, strerror (-ret));
     ret = CORE_RECV_END (&act, NULL, UNKNOWN_SIZE, GCS_ACT_CCHANGE);
     ck_assert_msg(0 == ret, "ret: %ld (%s)", ret, strerror(-ret));
-    Cache->free(act.out);
+    ck_assert(!core_test_check_conf(act.out, act.size, false, -1, 0));
 
     // check that backend is closed too
     ret = Backend->send (Backend, tmp, sizeof(tmp), GCS_MSG_ACTION);
@@ -491,10 +518,11 @@ core_test_cleanup ()
 }
 
 // just a smoke test for core API
-START_TEST (gcs_core_test_api)
+static void
+test_api(bool const enc)
 {
     gu::Config config;
-    core_test_init (&config);
+    core_test_init (&config, enc);
 
     ck_assert(NULL != Cache);
     ck_assert(NULL != Core);
@@ -506,8 +534,10 @@ START_TEST (gcs_core_test_api)
     const void* act_buf  = act3_str;
     size_t      act_size = sizeof(act3_str);
 
-    action_t act_s(act, NULL, NULL, act_size, GCS_ACT_WRITESET, -1, (gu_thread_t)-1);
-    action_t act_r(act, NULL, NULL, -1, (gcs_act_type_t)GCS_ACT_UNKNOWN, -1, (gu_thread_t)-1);
+    action_t act_s(act, NULL, NULL, act_size, GCS_ACT_WRITESET, -1,
+                   GU_THREAD_INITIALIZER);
+    action_t act_r(act, NULL, NULL, -1, GCS_ACT_UNKNOWN, -1,
+                   GU_THREAD_INITIALIZER);
     long i = 5;
 
     // test basic fragmentaiton
@@ -546,6 +576,17 @@ START_TEST (gcs_core_test_api)
     ck_assert(!CORE_RECV_ACT(&act_r, act, act_size, GCS_ACT_FLOW));
 
     core_test_cleanup ();
+}
+
+START_TEST (gcs_core_test_api)
+{
+    test_api(false);
+}
+END_TEST
+
+START_TEST (gcs_core_test_apiE)
+{
+    test_api(true);
 }
 END_TEST
 
@@ -592,17 +633,17 @@ DUMMY_INSTALL_COMPONENT (gcs_backend_t* backend, const gcs_comp_msg_t* comp)
     FAIL_IF (gcs_dummy_set_component(Backend, comp), "%s",
              "gcs_dummy_set_component");
     FAIL_IF (DUMMY_INJECT_COMPONENT (Backend, comp), "%s",
-             "DUMMT_INJECT_COMPONENT");
-    FAIL_IF (CORE_RECV_ACT (&act, NULL, UNKNOWN_SIZE, GCS_ACT_CCHANGE),
-             "%s", "CORE_RECV_ACT");
+             "DUMMY_INJECT_COMPONENT");
+    FAIL_IF (CORE_RECV_ACT (&act, NULL, UNKNOWN_SIZE, GCS_ACT_CCHANGE), "%s",
+             "CORE_RECV_ACT");
     FAIL_IF (core_test_check_conf(act.out, act.size, primary, my_idx, members),
              "%s", "core_test_check_conf");
-    Cache->free(act.out);
+
     return false;
 }
 
 static void
-CORE_TEST_OWN (int gcs_proto_ver)
+CORE_TEST_OWN(bool const enc, int gcs_proto_ver)
 {
     long const tout = 1000; // 100 ms timeout
 
@@ -610,8 +651,9 @@ CORE_TEST_OWN (int gcs_proto_ver)
     const void*          act_buf  = act2_str;
     size_t               act_size = sizeof(act2_str);
 
-    action_t act_s(act, NULL, NULL, act_size, GCS_ACT_WRITESET, -1, (gu_thread_t)-1);
-    action_t act_r(act, NULL, NULL, -1, (gcs_act_type_t)GCS_ACT_UNKNOWN, -1, (gu_thread_t)-1);
+    action_t act_s(act, NULL, NULL, act_size, GCS_ACT_WRITESET, -1,
+                   GU_THREAD_INITIALIZER);
+    action_t act_r(act, NULL, NULL, -1, GCS_ACT_UNKNOWN, -1,GU_THREAD_INITIALIZER);
 
     // Create primary and non-primary component messages
     gcs_comp_msg_t* prim     = gcs_comp_msg_new (true, false,  0, 1, 0);
@@ -622,7 +664,7 @@ CORE_TEST_OWN (int gcs_proto_ver)
     gcs_comp_msg_add (non_prim, "node1", 1);
 
     gu::Config config;
-    core_test_init (&config, true, gcs_proto_ver);
+    core_test_init (&config, enc, true, gcs_proto_ver);
 
     /////////////////////////////////////////////
     /// check behaviour in transitional state ///
@@ -654,7 +696,6 @@ CORE_TEST_OWN (int gcs_proto_ver)
     ck_assert(!gcs_dummy_set_component(Backend, non_prim));
     ck_assert(!CORE_RECV_ACT (&act_r, NULL, UNKNOWN_SIZE, GCS_ACT_CCHANGE));
     ck_assert(!core_test_check_conf(act_r.out, act_r.size, false, 0, 1));
-    Cache->free(act_r.out);
     ck_assert(!CORE_RECV_ACT (&act_r, act_buf, act_size, GCS_ACT_WRITESET));
     ck_assert_msg(-ENOTCONN == act_r.seqno,
                   "Expected -ENOTCONN, received %" PRId64 " (%s)",
@@ -685,7 +726,6 @@ CORE_TEST_OWN (int gcs_proto_ver)
     ck_assert(!CORE_SEND_END (&act_s, -ENOTCONN));
     ck_assert(!CORE_RECV_ACT (&act_r, NULL, UNKNOWN_SIZE, GCS_ACT_CCHANGE));
     ck_assert(!core_test_check_conf(act_r.out, act_r.size, false, 0, 1));
-    Cache->free(act_r.out);
 
     /*
      * TEST CASE 4: Action was sent successfully, but NON_PRIM component
@@ -701,7 +741,6 @@ CORE_TEST_OWN (int gcs_proto_ver)
     ck_assert(!CORE_SEND_END (&act_s, act_size));
     ck_assert(!CORE_RECV_ACT (&act_r, NULL, UNKNOWN_SIZE, GCS_ACT_CCHANGE));
     ck_assert(!core_test_check_conf(act_r.out, act_r.size, false, 0, 1));
-    Cache->free(act_r.out);
     ck_assert(!CORE_RECV_ACT (&act_r, act_buf, act_size, GCS_ACT_WRITESET));
     ck_assert_msg(-ENOTCONN == act_r.seqno,
                   "Expected -ENOTCONN, received %" PRId64 " (%s)",
@@ -751,7 +790,6 @@ CORE_TEST_OWN (int gcs_proto_ver)
     ck_assert(!gcs_dummy_set_component(Backend, non_prim));
     ck_assert(!CORE_RECV_ACT (&act_r, NULL, UNKNOWN_SIZE, GCS_ACT_CCHANGE));
     ck_assert(!core_test_check_conf(act_r.out, act_r.size, false, 0, 1));
-    Cache->free(act_r.out);
     ck_assert(!CORE_SEND_STEP (Core, tout, 1, __LINE__)); // 3rd frag
     ck_assert(!CORE_SEND_END (&act_s, -ENOTCONN));
 
@@ -766,7 +804,6 @@ CORE_TEST_OWN (int gcs_proto_ver)
     ck_assert(!CORE_SEND_STEP (Core, 4*tout, 1, __LINE__)); // 3rd frag
     ck_assert(!CORE_RECV_ACT (&act_r, NULL, UNKNOWN_SIZE, GCS_ACT_CCHANGE));
     ck_assert(!core_test_check_conf(act_r.out, act_r.size, false, 0, 1));
-    Cache->free(act_r.out);
     ck_assert(!CORE_SEND_END (&act_s, -ENOTCONN));
 
     gu_free (prim);
@@ -777,13 +814,19 @@ CORE_TEST_OWN (int gcs_proto_ver)
 
 START_TEST (gcs_core_test_own_v0)
 {
-    CORE_TEST_OWN(0);
+    CORE_TEST_OWN(false, 0);
 }
 END_TEST
 
 START_TEST (gcs_core_test_own_v1)
 {
-    CORE_TEST_OWN(1);
+    CORE_TEST_OWN(false, 1);
+}
+END_TEST
+
+START_TEST (gcs_core_test_own_v1E)
+{
+    CORE_TEST_OWN(true, 1);
 }
 END_TEST
 
@@ -875,7 +918,8 @@ START_TEST (gcs_core_test_gh74)
     gcs_state_msg_write (state_buf2, state_msg);
     gcs_state_msg_destroy (state_msg);
 
-    action_t act_r(NULL,  NULL, NULL, -1, (gcs_act_type_t)-1, -1, (gu_thread_t)-1);
+    action_t act_r(NULL,  NULL, NULL, -1, (gcs_act_type_t)-1, -1,
+                   GU_THREAD_INITIALIZER);
 
     // ========== from node1's view ==========
     ck_assert(!gcs_dummy_set_component(Backend, prim));
@@ -986,7 +1030,8 @@ START_TEST (gcs_core_test_gh74)
     // otherwise we will get following log
     // "FIFO violation: queue empty when local action received"
     const struct gu_buf act = {act_ptr, (ssize_t)act_size};
-    action_t act_s(&act, NULL, NULL, act_size, GCS_ACT_STATE_REQ, -1, (gu_thread_t)-1);
+    action_t act_s(&act, NULL, NULL, act_size, GCS_ACT_STATE_REQ, -1,
+                   GU_THREAD_INITIALIZER);
     CORE_SEND_START(&act_s);
     for(;;) {
         usleep(10000);
@@ -1040,8 +1085,10 @@ Suite *gcs_core_suite(void)
   if (skip == false) {
       tcase_add_test  (tcase, gcs_code_msg);
       tcase_add_test  (tcase, gcs_core_test_api);
+      tcase_add_test  (tcase, gcs_core_test_apiE);
       tcase_add_test  (tcase, gcs_core_test_own_v0);
       tcase_add_test  (tcase, gcs_core_test_own_v1);
+      tcase_add_test  (tcase, gcs_core_test_own_v1E);
 #ifdef GCS_ALLOW_GH74
       tcase_add_test  (tcase, gcs_core_test_gh74);
 #endif /* GCS_ALLOW_GH74 */

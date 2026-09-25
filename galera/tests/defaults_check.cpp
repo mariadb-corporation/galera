@@ -5,6 +5,8 @@
 #include <wsrep_api.h>
 extern "C" int wsrep_loader(wsrep_t*);
 
+#include <gcache_test_encryption.hpp>
+
 #include <gu_config.hpp>
 #include <gu_mutex.hpp>
 #include <gu_cond.hpp>
@@ -58,6 +60,7 @@ static const char* Defaults[] =
 #endif
     "gcache.dir",                  ".",
     "gcache.keep_pages_size",      "0",
+    "gcache.keep_plaintext_size",  "128M", /* defaults to gcache.page_size */
     "gcache.mem_size",             "0",
     "gcache.name",                 "galera.cache",
     "gcache.page_size",            "128M",
@@ -98,7 +101,6 @@ static const char* Defaults[] =
     "pc.wait_prim",                "true",
     "pc.wait_prim_timeout",        "PT30S",
     "pc.weight",                   "1",
-    "protonet.backend",            "asio",
     "protonet.version",            "0",
     "repl.causal_read_timeout",    "PT30S",
     "repl.commit_order",           "3",
@@ -171,7 +173,8 @@ struct app_ctx
     wsrep_t   provider_;
     bool      connected_;
 
-    app_ctx() : mtx_(), cond_(), provider_(), connected_(false) {}
+    app_ctx() : mtx_(0), cond_(0),
+                provider_(), connected_(false) {}
 };
 
 static enum wsrep_cb_status
@@ -231,7 +234,8 @@ recv_func(void* ctx)
     return NULL;
 }
 
-START_TEST(defaults)
+static void
+defaults(bool const enc)
 {
     DefaultsMap expected_defaults, real_defaults;
 
@@ -242,39 +246,48 @@ START_TEST(defaults)
     int ret = wsrep_status_t(wsrep_loader(&provider));
     ck_assert(WSREP_OK == ret);
 
+    wsrep_encrypt_cb_t const enc_cb(enc ? gcache_test_encrypt_cb : NULL);
+
     struct wsrep_init_args init_args =
         {
-            &ctx, // void* app_ctx
+            &ctx,     // void*       app_ctx
 
             /* Configuration parameters */
-            NULL, // const char* node_name
-            NULL, // const char* node_address
-            NULL, // const char* node_incoming
-            NULL, // const char* data_dir
-            NULL, // const char* options
-            0,    // int         proto_ver
+            NULL,     // const char* node_name
+            NULL,     // const char* node_address
+            NULL,     // const char* node_incoming
+            NULL,     // const char* data_dir
+            NULL,     // const char* options
+            0,        // int         proto_ver
 
             /* Application initial state information. */
-            NULL, // const wsrep_gtid_t* state_id
-            NULL, // const wsrep_buf_t*  state
+            NULL,     // const wsrep_gtid_t*    state_id
+            NULL,     // const wsrep_buf_t*     state
 
             /* Application callbacks */
-            log_cb, // wsrep_log_cb_t         logger_cb
-            conn_cb,// wsrep_connected_cb_t   connected_cb
-            view_cb,// wsrep_view_cb_t        view_handler_cb
-            NULL,   // wsrep_sst_request_cb_t sst_request_cb
-            NULL,   // wsrep_encrypt_cb_t     encrypt_cb
+            log_cb,   // wsrep_log_cb_t         logger_cb
+            conn_cb,  // wsrep_connected_cb_t   connected_cb
+            view_cb,  // wsrep_view_cb_t        view_handler_cb
+            NULL,     // wsrep_sst_request_cb_t sst_request_cb
+            enc_cb,   // wsrep_encrypt_cb_t     encrypt_cb
 
             /* Applier callbacks */
-            NULL, // wsrep_apply_cb_t      apply_cb
-            NULL, // wsrep_unordered_cb_t  unordered_cb
+            NULL,     // wsrep_apply_cb_t       apply_cb
+            NULL,     // wsrep_unordered_cb_t   unordered_cb
 
             /* State Snapshot Transfer callbacks */
-            NULL, // wsrep_sst_donate_cb_t sst_donate_cb
-            synced_cb,// wsrep_synced_cb_t synced_cb
+            NULL,     // wsrep_sst_donate_cb_t  sst_donate_cb
+            synced_cb,// wsrep_synced_cb_t      synced_cb
         };
     ret = provider.init(&provider, &init_args);
     ck_assert(WSREP_OK == ret);
+    if (enc_cb)
+    {
+        const char* key = "oaiasjfewoer";
+        wsrep_buf buf = { key, strlen(key) };
+        ret = provider.enc_set_key(&provider, &buf);
+        ck_assert(WSREP_OK == ret);
+    }
 
     /* some defaults are set only on connection attmept */
     ret = provider.connect(&provider, "cluster_name", "gcomm://", "", false);
@@ -287,7 +300,7 @@ START_TEST(defaults)
     {
         /* some configuration change events need to be received */
         gu_thread_t recv_thd;
-        gu_thread_create(&recv_thd, NULL, recv_func, &ctx);
+        gu_thread_create(NULL, &recv_thd,  recv_func, &ctx);
 
         mark_point();
 
@@ -310,9 +323,16 @@ START_TEST(defaults)
 
     mark_point();
 
-    /* cleanup files */
+    /* cleanup leftover files */
     ::unlink(real_defaults.find("gcache.name")->second.c_str());
     ::unlink("grastate.dat");
+    if (enc)
+    {
+        static const char* page_file = "gcache.page.000000";
+        ck_assert_msg(0 == ::unlink(page_file),
+                      "Failed to cleanup page file '%s': %d(%s)",
+                      page_file, errno, strerror(errno));
+    }
 
     /* now compare expected and real maps */
     std::ostringstream err;
@@ -354,6 +374,17 @@ START_TEST(defaults)
     ck_assert_msg(err.str().empty(), "Defaults discrepancies detected:\n%s",
                   err.str().c_str());
 }
+
+START_TEST(test_defaults)
+{
+    defaults(false);
+}
+END_TEST
+
+START_TEST(test_defaultsE)
+{
+    defaults(true);
+}
 END_TEST
 
 Suite* defaults_suite()
@@ -362,7 +393,8 @@ Suite* defaults_suite()
     TCase* tc;
 
     tc = tcase_create("defaults");
-    tcase_add_test(tc, defaults);
+    tcase_add_test(tc, test_defaults);
+    tcase_add_test(tc, test_defaultsE);
     tcase_set_timeout(tc, 120);
     suite_add_tcase(s, tc);
 

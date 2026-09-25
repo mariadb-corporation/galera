@@ -526,6 +526,29 @@ void epoll_reactor::run(long usec, op_queue<operation>& ops)
 #if defined(ASIO_HAS_TIMERFD)
     else if (ptr == &timer_fd_)
     {
+      // We must read the 8-byte timeout expiration counter (using the
+      // "timerfd" descriptor) every time when an EPOLLIN event occurs.
+      // Otherwise, the timer may stop notifying the application of new
+      // events, and all actions related to this timer will be frozen
+      // on some systems; or vice versa, we will get an infinite loop
+      // of notifications due to the constant readiness to read new data:
+      if (events[i].events & EPOLLIN)
+      {
+        // If timeout was expired, we should read the expiration counter:
+        uint64_t count;
+        ssize_t len = sizeof(count);
+        char * buf = reinterpret_cast<char *>(&count);
+        for(;;) {
+          ssize_t ret = read(timer_fd_, buf, len);
+          if (ret == len) break;
+          if (ret < 0)
+          {
+            if (EINTR == errno) continue; else break;
+          }
+          buf += ret;
+          len -= ret;
+        }
+      }
       check_timers = true;
     }
 #endif // defined(ASIO_HAS_TIMERFD)

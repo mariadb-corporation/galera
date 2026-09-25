@@ -23,7 +23,7 @@ namespace gcache
 
         static size_type const MAX_SIZE = sizeof(BufferHeader) + SSIZE_MAX_;
 
-        static size_type const MIN_SIZE = sizeof(BufferHeader) + 1;
+        static size_type const MIN_SIZE = sizeof(BufferHeader) + 0;
 
         static inline void assert_size(unsigned long long s)
         {

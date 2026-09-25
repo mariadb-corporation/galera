@@ -1091,7 +1091,7 @@ static DummyNode* create_dummy_node(size_t idx,
     gu::ssl_register_params(gu_conf);
     gcomm::Conf::register_params(gu_conf);
     const string conf = "evs://?" + Conf::EvsViewForgetTimeout + "=PT1H&"
-        + Conf::EvsInactiveCheckPeriod + "=" + to_string(Period(suspect_timeout)/3) + "&"
+        + Conf::EvsInactiveCheckPeriod + "=" + retrans_period + "&"
         + Conf::EvsSuspectTimeout + "=" + suspect_timeout + "&"
         + Conf::EvsInactiveTimeout + "=" + inactive_timeout + "&"
         + Conf::EvsKeepalivePeriod + "=" + retrans_period + "&"

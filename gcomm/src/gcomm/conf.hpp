@@ -213,10 +213,10 @@ namespace gcomm
          * @brief EVS inactive check period ("evs.inactive_check_period")
          *
          * This period controls how often node liveness is checked. Default
-         * is 1 second and there is no need to change this unless
-         * Conf::EvsSuspectTimeout or Conf::EvsInactiveTimeout is adjusted
-         * to smaller value. Default value is 1 second, minimum is 0.1 seconds
-         * and maximum is Conf::EvsSuspectTimeout/2.
+         * is 0.5 second and there is no need to change this unless
+         * Conf::EvsKeepalivePeriod is adjusted to smaller value.
+         * Default value is 0.5 second, minimum is 0.1 seconds
+         * and maximum is Conf::EvsKeepalivePeriod.
          */
         static std::string const EvsInactiveCheckPeriod;
 

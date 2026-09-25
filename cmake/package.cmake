@@ -22,6 +22,7 @@ set(CPACK_SOURCE_IGNORE_FILES
   "\\\\.gitmodules"
   "\\\\.travis\\\\.yml"
   "\\\\.bzrignore"
+  "/debian/changelog\\\\.in"
   "/tests/test_causal"
   "/tests/test_cppcheck"
   "/tests/test_dbt2"
@@ -60,4 +61,5 @@ set(CPACK_SOURCE_IGNORE_FILES
 set(CPACK_GENERATOR "TGZ")
 set(CPACK_PACKAGE_FILE_NAME "${PROJECT_NAME}-${GALERA_VERSION_WSREP_API}.${GALERA_VERSION_MAJOR}.${GALERA_VERSION_MINOR}${GALERA_VERSION_EXTRA}${GALERA_REVISION}-${CMAKE_SYSTEM_NAME}-${CMAKE_SYSTEM_PROCESSOR}")
 
+INCLUDE(cmake/mariadb.cmake)
 include(CPack)

@@ -1,5 +1,5 @@
 //
-// Copyright (C) 2020 Codership Oy <info@codership.com>
+// Copyright (C) 2020-2025 Codership Oy <info@codership.com>
 //
 
 #define GU_ASIO_IMPL
@@ -38,6 +38,7 @@ public:
     {
         return success;
     }
+
     virtual enum op_status server_handshake() GALERA_OVERRIDE
     {
         return success;
@@ -45,6 +46,7 @@ public:
 
     virtual void shutdown() GALERA_OVERRIDE
     {
+        gu::connection_monitor_disconnect((wsrep_connection_key_t)this);
         /* Note that we shut down the socket only for writes. This
          * is to keep the socket alive for reads until the peer closes
          * the connection. */
@@ -97,6 +99,17 @@ public:
     {
         return gu::AsioErrorCode(last_error_, gu_asio_system_category);
     }
+
+    virtual void
+    update_address_info(const std::string& local_addr,
+                        const std::string& remote_addr) GALERA_OVERRIDE
+    {
+        gu::connection_monitor_connect((wsrep_connection_key_t)this, scheme(),
+                                       local_addr, remote_addr);
+    }
+
+    virtual void update_SSL_info() GALERA_OVERRIDE {}
+
 private:
     void clear_error() { last_error_ = 0; }
     int fd_;
@@ -106,7 +119,7 @@ private:
 #ifdef GALERA_HAVE_SSL
 
 #include <openssl/ssl.h>
-
+#include <openssl/x509.h>
 #if OPENSSL_VERSION_NUMBER >= 0x1010100fL
 #define HAVE_READ_EX
 #define HAVE_WRITE_EX
@@ -147,7 +160,12 @@ public:
         GU_ASIO_DEBUG(this << " AsioSslStreamEngine::client_handshake: "
                       << result << " ssl error " << ssl_error
                       << " sys error " << sys_error);
-        return map_status(ssl_error, sys_error, "client_handshake");
+        enum op_status ret = map_status(ssl_error, sys_error, "client_handshake");
+        if (ret == success)
+        {
+            update_SSL_info();
+        }
+        return ret;
     }
 
     virtual enum op_status server_handshake() GALERA_OVERRIDE
@@ -159,7 +177,12 @@ public:
         GU_ASIO_DEBUG(this << " AsioSslStreamEngine::server_handshake: "
                       << result << " ssl error " << ssl_error
                       << " sys error " << sys_error);
-        return map_status(ssl_error, sys_error, "server_handshake");
+        enum op_status ret = map_status(ssl_error, sys_error, "server_handshake");
+        if (ret == success)
+        {
+            update_SSL_info();
+        }
+        return ret;
     }
 
     virtual void shutdown() GALERA_OVERRIDE
@@ -171,6 +194,7 @@ public:
         GU_ASIO_DEBUG(this << " AsioSslStreamEngine::shutdown: "
                       << result << " ssl error " << ssl_error
                       << " sys error " << sys_error);
+        gu::connection_monitor_disconnect((wsrep_connection_key_t)this);
     }
 
     virtual op_result read(void* buf, size_t max_count) GALERA_OVERRIDE
@@ -192,6 +216,45 @@ public:
                                  *last_error_category_ :
                                  gu_asio_system_category,
                                  last_verify_error_);
+    }
+
+    virtual void
+    update_address_info(const std::string& local_addr,
+                        const std::string& remote_addr) GALERA_OVERRIDE
+    {
+        gu::connection_monitor_connect((wsrep_connection_key_t)this, scheme(),
+                                       local_addr, remote_addr);
+    }
+
+    virtual void update_SSL_info() GALERA_OVERRIDE
+    {
+        clear_error();
+        std::string cipher;
+        std::string subject;
+        std::string issuer;
+        std::string version;
+
+        cipher = SSL_get_cipher(ssl_);
+        X509* ssl_cert = SSL_get_peer_certificate(ssl_);
+        if (ssl_cert != nullptr)
+        {
+            char *buf = X509_NAME_oneline(X509_get_subject_name(ssl_cert), 0, 0);
+            if (buf)
+            {
+                subject = buf;
+                OPENSSL_free(buf);
+            }
+            buf = X509_NAME_oneline(X509_get_issuer_name(ssl_cert), 0, 0);
+            if (buf)
+            {
+                issuer = buf;
+                OPENSSL_free(buf);
+            }
+            X509_free(ssl_cert);
+        }
+        version = SSL_get_version(ssl_);
+        gu::connection_monitor_ssl_info((wsrep_connection_key_t)this,
+                                        cipher, issuer, subject, version);
     }
 
 private:
@@ -442,6 +505,8 @@ public:
         , fd_(fd)
         , io_service_(io_service)
         , engine_(std::make_shared<AsioTcpStreamEngine>(fd_))
+        , local_addr_()
+        , remote_addr_()
         , non_blocking_(non_blocking)
         , have_encrypted_protocol_(encrypted_protocol)
         , timer_check_done_(false)
@@ -473,6 +538,7 @@ public:
                 {
                     engine_.reset();
                     engine_ = std::make_shared<AsioSslStreamEngine>(io_service_, fd_);
+                    engine_->update_address_info(local_addr_, remote_addr_);
                     client_encrypted_message_sent_ = true;
                     client_encrypted_message_sent_ts_ = gu::datetime::Date::monotonic();
                     if (not non_blocking_)
@@ -509,6 +575,7 @@ public:
                         {
                             engine_.reset();
                             engine_ = std::make_shared<AsioTcpStreamEngine>(fd_);
+                            engine_->update_address_info(local_addr_, remote_addr_);
                             tcp_engine_switch = true;
                             break;
                         }
@@ -542,6 +609,7 @@ public:
                 {
                     engine_.reset();
                     engine_ = std::make_shared<AsioTcpStreamEngine>(fd_);
+                    engine_->update_address_info(local_addr_, remote_addr_);
                 }
             }
             timer_check_done_ = true;
@@ -560,6 +628,7 @@ public:
             {
                 engine_.reset();
                 engine_ = std::make_shared<AsioSslStreamEngine>(io_service_, fd_);
+                engine_->update_address_info(local_addr_, remote_addr_);
                 timer_check_done_ = true;
                 return engine_->server_handshake();
             }
@@ -600,6 +669,23 @@ public:
         return engine_->last_error();
     }
 
+    virtual void
+    update_address_info(const std::string& local_addr,
+                        const std::string& remote_addr) GALERA_OVERRIDE
+    {
+        local_addr_ = local_addr;
+        remote_addr_ = remote_addr;
+        if (engine_)
+        {
+            engine_->update_address_info(local_addr, remote_addr);
+        }
+    }
+
+    virtual void update_SSL_info() GALERA_OVERRIDE
+    {
+        engine_->update_SSL_info();
+    }
+
 private:
     bool socket_poll(long msec)
     {
@@ -637,6 +723,10 @@ private:
     int fd_;
     gu::AsioIoService& io_service_;
     std::shared_ptr<AsioStreamEngine> engine_;
+    // Local and remote addresses are stored here to be passed to
+    // real engine update_address_info() after the engine is created
+    std::string local_addr_;
+    std::string remote_addr_;
     bool non_blocking_;
     bool have_encrypted_protocol_;
     bool timer_check_done_;
@@ -646,9 +736,145 @@ private:
 
 #endif // GALERA_HAVE_SSL
 
+class AsioWsrepStreamEngine : public gu::AsioStreamEngine
+{
+public:
+    AsioWsrepStreamEngine(wsrep_tls_service_v1_t* service, int fd)
+        : service_(service)
+        , stream_()
+        , last_error_value_()
+        , last_error_category_()
+    {
+        stream_.fd = fd;
+        stream_.opaque = 0;
+        int err;
+        if ((err = service_->stream_init(service_->context, &stream_)))
+        {
+            gu_throw_error(err) << "Failed to init wsrep TLS stream";
+        }
+    }
+
+    ~AsioWsrepStreamEngine()
+    {
+        service_->stream_deinit(service_->context, &stream_);
+    }
+
+    AsioWsrepStreamEngine(const AsioWsrepStreamEngine&) = delete;
+    AsioWsrepStreamEngine& operator=(const AsioWsrepStreamEngine&) = delete;
+
+    virtual std::string scheme() const GALERA_OVERRIDE
+    {
+        return gu::scheme::ssl;
+    }
+
+    virtual enum op_status client_handshake() GALERA_OVERRIDE
+    {
+        clear_error();
+        return map_status(
+            service_->stream_client_handshake(service_->context, &stream_));
+    }
+
+    virtual enum op_status server_handshake() GALERA_OVERRIDE
+    {
+        clear_error();
+        return map_status(
+            service_->stream_server_handshake(service_->context, &stream_));
+    }
+
+    virtual op_result read(void* buf, size_t max_count) GALERA_OVERRIDE
+    {
+        clear_error();
+        size_t bytes_transferred(0);
+        return op_result{
+            map_status(
+                service_->stream_read(service_->context,
+                                      &stream_,
+                                      buf, max_count, &bytes_transferred)),
+                bytes_transferred};
+    }
+
+    virtual op_result write(const void* buf, size_t count) GALERA_OVERRIDE
+    {
+        clear_error();
+        size_t bytes_transferred(0);
+        return op_result{
+            map_status(
+                service_->stream_write(service_->context,
+                                       &stream_,
+                                       buf, count, &bytes_transferred)),
+                bytes_transferred};
+    }
+
+    virtual void shutdown() GALERA_OVERRIDE
+    {
+        clear_error();
+        // @todo Handle return code from shutdown call.
+        service_->stream_shutdown(service_->context, &stream_);
+    }
+
+    virtual gu::AsioErrorCode last_error() const GALERA_OVERRIDE
+    {
+        return gu::AsioErrorCode(last_error_value_, last_error_category_,
+                                 &stream_);
+    }
+
+    virtual void
+    update_address_info(const std::string& local_addr,
+                        const std::string& remote_addr) GALERA_OVERRIDE
+    {
+        // Done in server code
+    }
+
+    virtual void update_SSL_info() GALERA_OVERRIDE
+    {
+      // Done in server code
+    }
+
+private:
+
+    enum op_status map_status(enum wsrep_tls_result status)
+    {
+        switch (status)
+        {
+        case wsrep_tls_result_success:
+            return success;
+        case wsrep_tls_result_want_read:
+            return want_read;
+        case wsrep_tls_result_want_write:
+            return want_write;
+        case wsrep_tls_result_eof:
+            return eof;
+        case wsrep_tls_result_error:
+            last_error_value_ = service_->stream_get_error_number(
+                service_->context,
+                &stream_);
+            last_error_category_ = service_->stream_get_error_category(
+                service_->context,
+                &stream_);
+            return error;
+        }
+        assert(0);
+        return error;
+    }
+
+    void clear_error() { last_error_value_ = 0; last_error_category_ = 0; }
+    wsrep_tls_service_v1_t* service_;
+    wsrep_tls_stream_t stream_;
+    int last_error_value_;
+    const void* last_error_category_;
+};
+
 std::shared_ptr<gu::AsioStreamEngine> gu::AsioStreamEngine::make(
     AsioIoService& io_service, const std::string& scheme, int fd, bool non_blocking)
 {
+    // Always prefer application defined TLS if enabled.
+    if (io_service.tls_service())
+    {
+        GU_ASIO_DEBUG("AsioStreamEngine::make use tls_service engine");
+        return std::unique_ptr<AsioStreamEngine>(
+            new AsioWsrepStreamEngine(io_service.tls_service(), fd));
+    }
+
     if (scheme == "tcp")
     {
 #ifdef GALERA_HAVE_SSL

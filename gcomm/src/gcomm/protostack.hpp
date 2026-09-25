@@ -8,6 +8,7 @@
 #include "gcomm/protolay.hpp"
 
 #include "gu_lock.hpp"
+#include "gu_thread_keys.hpp"
 
 #include <vector>
 #include <deque>
@@ -25,7 +26,7 @@ namespace gcomm
 class gcomm::Protostack
 {
 public:
-    Protostack() : protos_(), mutex_() { }
+    Protostack() : protos_(), mutex_(gu::get_mutex_key(gu::GU_MUTEX_KEY_PROTOSTACK)) { }
     void push_proto(Protolay* p);
     void pop_proto(Protolay* p);
     gu::datetime::Date handle_timers();

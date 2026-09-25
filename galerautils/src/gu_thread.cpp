@@ -67,12 +67,12 @@ void gu::ThreadSchedparam::print(std::ostream& os) const
     os << policy_str << ":" << prio();
 }
 
-gu::ThreadSchedparam gu::thread_get_schedparam(pthread_t thd)
+gu::ThreadSchedparam gu::thread_get_schedparam(gu_thread_t thd)
 {
     int policy;
     struct sched_param sp;
     int err;
-    if ((err = pthread_getschedparam(thd, &policy, &sp)) != 0)
+    if ((err = gu_thread_getschedparam(thd, &policy, &sp)) != 0)
     {
         gu_throw_system_error(err) << "Failed to read thread schedparams";
     }
@@ -81,7 +81,7 @@ gu::ThreadSchedparam gu::thread_get_schedparam(pthread_t thd)
 
 static bool schedparam_not_supported(false);
 
-void gu::thread_set_schedparam(pthread_t thd, const gu::ThreadSchedparam& sp)
+void gu::thread_set_schedparam(gu_thread_t thd, const gu::ThreadSchedparam& sp)
 {
     if (schedparam_not_supported) return;
 #if defined(__sun__)
@@ -90,7 +90,7 @@ void gu::thread_set_schedparam(pthread_t thd, const gu::ThreadSchedparam& sp)
     struct sched_param spstr = { sp.prio() };
 #endif
     int err;
-    if ((err = pthread_setschedparam(thd, sp.policy(), &spstr)) != 0)
+    if ((err = gu_thread_setschedparam(thd, sp.policy(), &spstr)) != 0)
     {
         if (err == ENOSYS)
         {

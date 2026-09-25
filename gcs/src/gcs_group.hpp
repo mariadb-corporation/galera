@@ -11,14 +11,15 @@
 #ifndef _gcs_group_h_
 #define _gcs_group_h_
 
-#include <stdbool.h>
-
+#include <wsrep_ps.h> // pfs declarations
 #include "gcs_gcache.hpp"
 #include "gcs_node.hpp"
 #include "gcs_recv_msg.hpp"
 #include "gcs_seqno.hpp"
 #include "gcs_state_msg.hpp"
 #include "gu_unordered.hpp"
+#include "gu_mutex.hpp"
+#include "gu_thread_keys.hpp"
 
 #include "gu_config.hpp"
 
@@ -28,6 +29,9 @@ extern uint8_t gcs_group_conf_to_vote_policy(gu::Config& cnf);
 
 #include "gu_status.hpp"
 #include "gu_utils.hpp"
+
+#include <wsrep_membership_service.h>
+#include <stdbool.h>
 
 typedef enum gcs_group_state
 {
@@ -48,6 +52,11 @@ struct VoteResult { gcs_seqno_t seqno; int64_t res; };
 
 typedef struct gcs_group
 {
+    mutable
+    gu::Mutex     memb_mtx_;    // syncs updates by the recv thread and reads
+                                // by gcs_group_get_membership()
+    gcs_seqno_t   memb_epoch_;
+
     gcache_t*     cache;
     gu::Config&   cnf;
     gcs_seqno_t   act_id_;      // current(last) action seqno
@@ -185,6 +194,7 @@ gcs_group_handle_act_msg (gcs_group_t*          const group,
     assert (sender_idx < group->num);
     assert (frg->act_id > 0);
     assert (frg->act_size > 0);
+    assert (gcs_act_in_cache(frg->act_type));
 
     // clear reset flag if set by own first fragment after reset flag was set
     group->frag_reset = (group->frag_reset &&
@@ -283,7 +293,30 @@ extern int
 gcs_group_param_set(gcs_group_t& group,
                     const std::string& key, const std::string& val);
 
-extern void
+extern int
 gcs_group_get_status(const gcs_group_t* group, gu::Status& status);
+
+void
+gcs_group_get_membership(const gcs_group_t& group,
+                         wsrep_allocator_cb alloc,
+                         struct wsrep_membership** memb);
+void
+gcs_group_get_membership(const gcs_group_t& group,
+                         wsrep_allocator_cb alloc,
+                         struct wsrep_membership_v2** memb);
+
+extern int
+gcs_group_fetch_pfs_info(const gcs_group_t*  group,
+                         wsrep_node_info_t** nodes,
+                         uint32_t*           size,
+                         int32_t*            my_index,
+                         uint32_t            max_version);
+
+extern int
+gcs_group_fetch_pfs_stat(const gcs_group_t*  group,
+                         wsrep_node_stat_t** nodes,
+                         uint32_t*           size,
+                         int32_t*            my_index,
+                         uint32_t            max_version);
 
 #endif /* _gcs_group_h_ */

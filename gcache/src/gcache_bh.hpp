@@ -20,6 +20,7 @@ namespace gcache
     static uint16_t const BUFFER_RELEASED  = 1 << 0;
     static uint16_t const BUFFER_SKIPPED   = 1 << 1;
     static uint16_t const BUFFER_FLAGS_MAX = (uint32_t(BUFFER_SKIPPED)<<1) - 1;
+    static uint32_t const BUFFER_ALIGNMENT = MemOps::ALIGNMENT;
 
     enum StorageType
     {
@@ -107,9 +108,10 @@ namespace gcache
         bh->flags |= BUFFER_RELEASED;
     }
 
-    static inline BufferHeader* BH_next(BufferHeader* bh)
+    static inline uint32_t
+    BH_size(uint32_t s)
     {
-        return BH_cast((reinterpret_cast<uint8_t*>(bh) + bh->size));
+        return s + sizeof(BufferHeader);
     }
 
     static inline std::ostream&

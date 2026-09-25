@@ -8,6 +8,11 @@ endif()
 
 add_definitions(-DGALERA_HAVE_SSL)
 
+IF(APPLE)
+  SET(OPENSSL_ROOT_DIR /usr/local/opt/openssl)
+  SET(OPENSSL_LIBRARIES /usr/local/opt/openssl/lib)
+ENDIF()
+
 #
 # Helper macros to check Ecdh features.
 #

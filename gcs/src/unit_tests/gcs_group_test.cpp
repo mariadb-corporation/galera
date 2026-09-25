@@ -795,7 +795,9 @@ test_gcs_group_find_donor(bool const a)
     // 6th home6 1        105
 
     const int number = 7;
+    group.memb_mtx_.lock();
     group_nodes_free(&group);
+    group.memb_mtx_.unlock();
     group.nodes = (gcs_node_t*)malloc(sizeof(gcs_node_t) * number);
     group.num = number;
     const gcs_seqno_t seqnos[] = {90, 95, 105, 100, 90, 95, 105};

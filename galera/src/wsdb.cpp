@@ -35,9 +35,9 @@ galera::Wsdb::Wsdb()
     :
     trx_pool_  (TrxHandleMaster::LOCAL_STORAGE_SIZE(), 512, "LocalTrxHandle"),
     trx_map_   (),
-    trx_mutex_ (),
+    trx_mutex_ (gu::get_mutex_key(gu::GU_MUTEX_KEY_WSDB_TRX)),
     conn_map_  (),
-    conn_mutex_()
+    conn_mutex_(gu::get_mutex_key(gu::GU_MUTEX_KEY_WSDB_CONN))
 {}
 
 

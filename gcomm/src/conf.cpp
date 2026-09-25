@@ -128,7 +128,6 @@ gcomm::Conf::register_params(gu::Config& cnf)
     GCOMM_CONF_ADD (BaseHost);
     GCOMM_CONF_ADD (BasePort);
 
-    GCOMM_CONF_ADD_DEFAULT(ProtonetBackend);
     GCOMM_CONF_ADD_DEFAULT(ProtonetVersion);
 
     GCOMM_CONF_ADD        (TcpNonBlocking);

@@ -27,13 +27,14 @@ namespace gu
     {
     public:
 
-        Mutex () : value_()
+        Mutex (const wsrep_mutex_key_t* key) : value_()
 #ifdef GU_MUTEX_DEBUG
                  , owned_()
                  , locked_()
 #endif /* GU_MUTEX_DEBUG */
         {
-            gu_mutex_init (&value_, NULL); // always succeeds
+            if (gu_mutex_init (key, &value_))
+                gu_throw_fatal;
         }
 
         ~Mutex ()

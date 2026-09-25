@@ -69,7 +69,7 @@ START_TEST(gu_dbug_test)
     /* Run few threads concurrently */
     stop = time(NULL) + 2;
     for (i = 0; i < N_THREADS; i++)
-        gu_thread_create(&th[i], NULL, &dbg_thr, NULL);
+        gu_thread_create(NULL, &th[i], &dbg_thr, NULL);
     for (i = 0; i < N_THREADS; i++)
         gu_thread_join(th[i], NULL);
 }

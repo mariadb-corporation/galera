@@ -2,6 +2,7 @@
 // Copyright (C) 2011-2021 Codership Oy <info@codership.com>
 //
 
+#include "galera_test_env.hpp"
 
 #include "ist.hpp"
 #include "ist_proto.hpp"
@@ -42,7 +43,7 @@ START_TEST(test_ist_recv_addr_not_set)
     {
         std::string const key(galera::ist::Receiver::conf_recv_addr_key());
         galera::check_recv_addr(conf);
-        galera::IST_determine_addr(conf, key);
+        galera::IST_determine_addr(conf, key, false);
         ck_abort_msg("Exception not thrown");
     }
     catch (const gu::Exception& e)
@@ -60,7 +61,7 @@ START_TEST(test_ist_recv_addr_base_host)
     std::string const key(galera::ist::Receiver::conf_recv_addr_key());
     galera::check_recv_addr(conf);
     test_ist_recv_addr_expect("tcp://127.0.0.1:4568",
-                              galera::IST_determine_addr(conf, key));
+                              galera::IST_determine_addr(conf, key,false));
 }
 END_TEST
 
@@ -71,7 +72,7 @@ START_TEST(test_ist_recv_addr_ip)
     std::string const key(galera::ist::Receiver::conf_recv_addr_key());
     conf.set(key, "127.0.0.1");
     test_ist_recv_addr_expect("tcp://127.0.0.1:4568",
-                              galera::IST_determine_addr(conf, key));
+                              galera::IST_determine_addr(conf, key, false));
 }
 END_TEST
 
@@ -82,7 +83,7 @@ START_TEST(test_ist_recv_addr_ip_port)
     std::string const key(galera::ist::Receiver::conf_recv_addr_key());
     conf.set(key, "127.0.0.1:10001");
     test_ist_recv_addr_expect("tcp://127.0.0.1:10001",
-                              galera::IST_determine_addr(conf, key));
+                              galera::IST_determine_addr(conf, key, false));
 }
 END_TEST
 
@@ -93,7 +94,7 @@ START_TEST(test_ist_recv_addr_tcp_ip)
     std::string const key(galera::ist::Receiver::conf_recv_addr_key());
     conf.set(key, "tcp://127.0.0.1");
     test_ist_recv_addr_expect("tcp://127.0.0.1:4568",
-                              galera::IST_determine_addr(conf, key));
+                              galera::IST_determine_addr(conf, key, false));
 }
 END_TEST
 
@@ -104,7 +105,7 @@ START_TEST(test_ist_recv_addr_tcp_ip_port)
     std::string const key(galera::ist::Receiver::conf_recv_addr_key());
     conf.set(key, "tcp://127.0.0.1");
     test_ist_recv_addr_expect("tcp://127.0.0.1:4568",
-                              galera::IST_determine_addr(conf, key));
+                              galera::IST_determine_addr(conf, key, false));
 }
 END_TEST
 
@@ -117,7 +118,7 @@ START_TEST(test_ist_recv_bind_not_set)
     try
     {
         std::string const bind_key(galera::ist::Receiver::conf_bind_addr_key());
-        (void)galera::IST_determine_addr(conf, bind_key);
+        (void)galera::IST_determine_addr(conf, bind_key, false);
         ck_abort_msg("Exception not thrown");
     }
     catch (const gu::NotSet&) { }
@@ -136,7 +137,7 @@ START_TEST(test_ist_recv_addr_auto_ssl_scheme)
     std::string const key(galera::ist::Receiver::conf_recv_addr_key());
     conf.set(key, "127.0.0.1");
     test_ist_recv_addr_expect("ssl://127.0.0.1:4568",
-                              galera::IST_determine_addr(conf, key));
+                              galera::IST_determine_addr(conf, key, false));
 }
 END_TEST
 
@@ -149,7 +150,7 @@ START_TEST(test_ist_recv_addr_ssl_scheme)
     std::string const key(galera::ist::Receiver::conf_recv_addr_key());
     conf.set(key, "ssl://127.0.0.1");
     test_ist_recv_addr_expect("ssl://127.0.0.1:4568",
-                              galera::IST_determine_addr(conf, key));
+                              galera::IST_determine_addr(conf, key, false));
 }
 END_TEST
 
@@ -314,8 +315,8 @@ namespace
     {
     public:
         ISTHandler() :
-            mutex_(),
-            cond_(),
+            mutex_(0),
+            cond_(0),
             seqno_(0),
             eof_(false),
             error_(0)
@@ -350,10 +351,9 @@ namespace
             seqno_ = ts->global_seqno();
         }
 
-        void ist_cc(const gcs_action& act, bool must_apply,
-                    bool preload) override
+        void ist_cc(const gcs_act_cchange& cc, const gcs_action& act,
+                    bool must_apply, bool preload) override
         {
-            gcs_act_cchange const cc(act.buf, act.size);
             assert(act.seqno_g == cc.seqno);
 
             log_info << "ist_cc" << cc.seqno;
@@ -365,6 +365,7 @@ namespace
             {
                 assert(seqno_ < cc.seqno);
             }
+            seqno_ = cc.seqno;
         }
 
         void ist_end(const ist::Result& result) override
@@ -385,6 +386,8 @@ namespace
             }
             return error_;
         }
+
+        wsrep_seqno_t seqno() const { return seqno_; }
 
     private:
         gu::Mutex mutex_;
@@ -424,9 +427,16 @@ extern "C" void* receiver_thd(void* arg)
 
     receiver.ready(rargs->first_);
 
-    log_info << "IST wait finished with status: " << isth.wait();
+    int ist_error(isth.wait());
+    log_info << "IST wait finished with status: " << ist_error;
+    assert(0 == ist_error);
+    ck_assert_msg(0 == ist_error, "Receiver exits with error: %d", ist_error);
 
     receiver.finished();
+
+    // gcache cleanup like what would result after purge_trxs_upto()
+    rargs->gcache_.seqno_release(isth.seqno());
+
     return 0;
 }
 
@@ -495,17 +505,18 @@ static void store_trx(gcache::GCache* const gcache,
         ssize_t trx_size(trx->gather(bufs));
         mark_point();
         trx->finalize(last_seen);
-        ptr = static_cast<gu::byte_t*>(gcache->malloc(trx_size));
+        void* ptx;
+        ptr = static_cast<gu::byte_t*>(gcache->malloc(trx_size, ptx));
 
         /* concatenate buffer vector */
-        gu::byte_t* p(ptr);
+        gu::byte_t* p(static_cast<gu::byte_t*>(ptx));
         for (size_t k(0); k < bufs->size(); ++k)
         {
             ::memcpy(p, bufs[k].ptr, bufs[k].size); p += bufs[k].size;
         }
-        assert ((p - ptr) == trx_size);
+        assert ((p - static_cast<gu::byte_t*>(ptx)) == trx_size);
 
-        gu::Buf ws_buf = { ptr, trx_size };
+        gu::Buf ws_buf = { ptx, trx_size };
         mark_point();
         galera::WriteSetIn wsi(ws_buf);
         assert (wsi.last_seen() == last_seen);
@@ -514,9 +525,10 @@ static void store_trx(gcache::GCache* const gcache,
         wsi.set_seqno(i, pa_range);
         assert (wsi.seqno()     == int64_t(i));
         assert (wsi.pa_range()  == pa_range);
-    }
 
-    gcache->seqno_assign(ptr, i, GCS_ACT_WRITESET, (i - pa_range) <= 0);
+        gcache->seqno_assign(ptr, i, GCS_ACT_WRITESET, (i - pa_range) <= 0);
+        gcache->seqno_release(i);
+    }
 }
 
 static void store_cc(gcache::GCache* const gcache,
@@ -534,19 +546,37 @@ static void store_cc(gcache::GCache* const gcache,
 
     void* tmp;
     int   const cc_size(cc.write(&tmp));
-    void* const cc_ptr(gcache->malloc(cc_size));
+    void* ptx;
+    void* const cc_ptr(gcache->malloc(cc_size, ptx));
 
     ck_assert(NULL != cc_ptr);
-    memcpy(cc_ptr, tmp, cc_size);
+    memcpy(ptx, tmp, cc_size);
     free(tmp);
+
     gcache->seqno_assign(cc_ptr, i, GCS_ACT_CCHANGE, i > 0);
+    gcache->seqno_release(i);
 }
 
-static void test_ist_common(int const version)
+void log_test_name(int const v, bool const send_enc, bool const recv_enc)
+{
+    log_info << "\n\n"
+        "##########################\n"
+        "##                      ##\n"
+        "##      IST v" << v << ' ' << (send_enc ? 'E' : 'P')
+             << (recv_enc ? 'E' : 'P') << "     ##\n"
+        "##                      ##\n"
+        "##########################\n";
+}
+
+static void test_ist_common(int  const version,
+                            bool const sender_enc,
+                            bool const receiver_enc)
 {
     using galera::KeyData;
     using galera::TrxHandle;
     using galera::KeyOS;
+
+    log_test_name(version, sender_enc, receiver_enc);
 
     TrxHandleMaster::Pool lp(TrxHandleMaster::LOCAL_STORAGE_SIZE(), 4,
                              "ist_common");
@@ -555,22 +585,13 @@ static void test_ist_common(int const version)
     int const trx_version(select_trx_version(version));
     TrxHandleMaster::Params const trx_params("", trx_version,
                                        galera::KeySet::MAX_VERSION);
-    std::string const dir(".");
 
-    gu::Config conf_sender;
-    galera::ReplicatorSMM::InitConfig(conf_sender, NULL, NULL);
-    std::string const gcache_sender_file("ist_sender.cache");
-    conf_sender.set("gcache.name", gcache_sender_file);
-    conf_sender.set("gcache.size", "1M");
-    gcache::GCache* gcache_sender = new gcache::GCache(NULL, conf_sender, dir);
+    TestEnv sender_env("ist_sender", sender_enc);
+    gcache::GCache* gcache_sender = &sender_env.gcache();
+    if (sender_enc) gcache_sender->param_set("gcache.keep_pages_size", "1M");
 
-    gu::Config conf_receiver;
-    galera::ReplicatorSMM::InitConfig(conf_receiver, NULL, NULL);
-    std::string const gcache_receiver_file("ist_receiver.cache");
-    conf_receiver.set("gcache.name", gcache_receiver_file);
-    conf_receiver.set("gcache.size", "1M");
-    gcache::GCache* gcache_receiver = new gcache::GCache(NULL, conf_receiver,
-                                                         dir);
+    TestEnv receiver_env("ist_receiver", receiver_enc);
+    gcache::GCache* gcache_receiver = &receiver_env.gcache();
 
     std::string receiver_addr("tcp://127.0.0.1:0");
     wsrep_uuid_t uuid;
@@ -600,46 +621,115 @@ static void test_ist_common(int const version)
 
     gu_thread_t sender_thread, receiver_thread;
 
-    gu_thread_create(&sender_thread, 0, &sender_thd, &sargs);
+    gu_thread_create(NULL, &sender_thread, &sender_thd, &sargs);
     mark_point();
     usleep(100000);
-    gu_thread_create(&receiver_thread, 0, &receiver_thd, &rargs);
+    gu_thread_create(NULL, &receiver_thread,  &receiver_thd, &rargs);
     mark_point();
 
     gu_thread_join(sender_thread, 0);
     gu_thread_join(receiver_thread, 0);
 
     mark_point();
-
-    delete gcache_sender;
-    delete gcache_receiver;
-
-    mark_point();
-    unlink(gcache_sender_file.c_str());
-    unlink(gcache_receiver_file.c_str());
 }
 
-START_TEST(test_ist_v7)
+/* REPL proto 7 tests: trx ver: 3, STR ver: 2, alignment: - */
+START_TEST(test_ist_v7PP)
 {
-    test_ist_common(7);      /* trx ver: 3, STR ver: 2, alignment: none */
+    test_ist_common(7, false, false);
 }
 END_TEST
 
-START_TEST(test_ist_v8)
+START_TEST(test_ist_v7PE)
 {
-    test_ist_common(8);      /* trx ver: 3, STR ver: 2, alignment: 8    */
+    test_ist_common(7, false, true);
 }
 END_TEST
 
-START_TEST(test_ist_v9)
+START_TEST(test_ist_v7EP)
 {
-    test_ist_common(9);      /* trx ver: 4, STR ver: 2, alignment: 8    */
+    test_ist_common(7, true, false);
 }
 END_TEST
 
-START_TEST(test_ist_v10)
+START_TEST(test_ist_v7EE)
 {
-    test_ist_common(10);     /* trx ver: 5, STR ver: 3, alignment: 8    */
+    test_ist_common(7, true, true);
+}
+END_TEST
+
+/* REPL proto 8 tests: trx ver: 3, STR ver: 2, alignment: 8 */
+START_TEST(test_ist_v8PP)
+{
+    test_ist_common(8, false, false);
+}
+END_TEST
+
+START_TEST(test_ist_v8PE)
+{
+    test_ist_common(8, false, true);
+}
+END_TEST
+
+START_TEST(test_ist_v8EP)
+{
+    test_ist_common(8, true, false);
+}
+END_TEST
+
+START_TEST(test_ist_v8EE)
+{
+    test_ist_common(8, true, true);
+}
+END_TEST
+
+/* REPL proto 9 tests: trx ver: 4, STR ver: 2, alignment: 8 */
+START_TEST(test_ist_v9PP)
+{
+    test_ist_common(9, false, false);
+}
+END_TEST
+
+START_TEST(test_ist_v9PE)
+{
+    test_ist_common(9, false, true);
+}
+END_TEST
+
+START_TEST(test_ist_v9EP)
+{
+    test_ist_common(9, true, false);
+}
+END_TEST
+
+START_TEST(test_ist_v9EE)
+{
+    test_ist_common(9, true, true);
+}
+END_TEST
+
+/* REPL proto 10 (Galera 4.0) tests: trx ver: 5, STR ver: 3, alignment: 8 */
+START_TEST(test_ist_v10PP)
+{
+    test_ist_common(10, false, false);
+}
+END_TEST
+
+START_TEST(test_ist_v10PE)
+{
+    test_ist_common(10, false, true);
+}
+END_TEST
+
+START_TEST(test_ist_v10EP)
+{
+    test_ist_common(10, true, false);
+}
+END_TEST
+
+START_TEST(test_ist_v10EE)
+{
+    test_ist_common(10, true, true);
 }
 END_TEST
 
@@ -692,19 +782,31 @@ Suite* ist_suite()
     suite_add_tcase(s, tc);
     tc = tcase_create("test_ist_v7");
     tcase_set_timeout(tc, 60);
+    tcase_add_test(tc, test_ist_v7PP);
+    tcase_add_test(tc, test_ist_v7PE);
+    tcase_add_test(tc, test_ist_v7EP);
+    tcase_add_test(tc, test_ist_v7EE);
     suite_add_tcase(s, tc);
-    tcase_add_test(tc, test_ist_v7);
     tc = tcase_create("test_ist_v8");
     tcase_set_timeout(tc, 60);
-    tcase_add_test(tc, test_ist_v8);
+    tcase_add_test(tc, test_ist_v8PP);
+    tcase_add_test(tc, test_ist_v8PE);
+    tcase_add_test(tc, test_ist_v8EP);
+    tcase_add_test(tc, test_ist_v8EE);
     suite_add_tcase(s, tc);
     tc = tcase_create("test_ist_v9");
     tcase_set_timeout(tc, 60);
-    tcase_add_test(tc, test_ist_v9);
+    tcase_add_test(tc, test_ist_v9PP);
+    tcase_add_test(tc, test_ist_v9PE);
+    tcase_add_test(tc, test_ist_v9EP);
+    tcase_add_test(tc, test_ist_v9EE);
     suite_add_tcase(s, tc);
     tc = tcase_create("test_ist_v10");
     tcase_set_timeout(tc, 60);
-    tcase_add_test(tc, test_ist_v10);
+    tcase_add_test(tc, test_ist_v10PP);
+    tcase_add_test(tc, test_ist_v10PE);
+    tcase_add_test(tc, test_ist_v10EP);
+    tcase_add_test(tc, test_ist_v10EE);
     suite_add_tcase(s, tc);
 
     return s;

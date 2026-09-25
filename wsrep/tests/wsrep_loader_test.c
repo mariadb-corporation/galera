@@ -8,20 +8,20 @@
  *       minimal.
  */
 
-#include "gu_conf.h"
-
 #include "wsrep_api.h"
+#include "wsrep_membership_service.h"
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <dlfcn.h>
 
 #define LOG_FILE "wsrep_tests.log"
-FILE* log_file = NULL;
+static FILE* log_file = NULL;
 static void log_fn(wsrep_log_level_t level, const char* msg)
 {
     FILE* f = (log_file ? log_file : stdout);
-    fprintf(f, "%d: %s", level, msg);
+    fprintf(f, "%d: %s\n", level, msg);
     fflush(f);
 }
 
@@ -32,6 +32,7 @@ static const char* get_provider()
 
 #define FAIL_UNLESS(x) if (!(x)) abort()
 
+static
 int wsrep_load_unload()
 {
     wsrep_t* wsrep = 0;
@@ -55,6 +56,79 @@ int wsrep_load_unload()
     return 0;
 }
 
+static
+int wsrep_load_unload_membership_v1()
+{
+    wsrep_t* wsrep = 0;
+    FAIL_UNLESS(wsrep_load(get_provider(), &wsrep, &log_fn) == 0);
+    FAIL_UNLESS(wsrep != NULL);
+
+    void* const dlh = wsrep->dlh;
+    FAIL_UNLESS(NULL != dlh);
+    wsrep_membership_service_v1_init_fn   wms_init   =
+        dlsym(dlh, WSREP_MEMBERSHIP_SERVICE_V1_INIT_FN);
+    FAIL_UNLESS(NULL != wms_init);
+    wsrep_membership_service_v1_deinit_fn wms_deinit =
+        dlsym(dlh, WSREP_MEMBERSHIP_SERVICE_V1_DEINIT_FN);
+    FAIL_UNLESS(NULL != wms_deinit);
+    {
+        struct wsrep_membership_service_v1 membership_v1;
+        wsrep_status_t ret = (*wms_init)(&membership_v1);
+        FAIL_UNLESS(WSREP_OK == ret);
+        FAIL_UNLESS(membership_v1.get_membership != NULL);
+        {
+            wsrep_gtid_t state_id = WSREP_GTID_UNDEFINED;
+            struct ctx {} ctx;
+
+            struct wsrep_init_args args =
+            {
+                .app_ctx       = &ctx,
+
+                .node_name     = "example listener",
+                .node_address  = "127.0.0.1",
+                .node_incoming = "",
+                .data_dir      = ".", // working directory
+                .options       = "gcache.size=1K",
+                .proto_ver     = 127, // maximum supported
+
+                .state_id      = &state_id,
+                .state         = NULL,
+
+                .logger_cb      = log_fn,
+                .view_cb        = NULL,
+                .sst_request_cb = NULL,
+                .encrypt_cb     = NULL,
+                .apply_cb       = NULL,
+                .unordered_cb   = NULL,
+                .sst_donate_cb  = NULL,
+                .synced_cb      = NULL
+            };
+
+/* Some GCC/ASAN builds hang at throw if called via dlopen():
+   https://gcc.gnu.org/bugzilla/show_bug.cgi?id=91325
+   Disable test in ASAN builds until the bug is fixed. */
+#ifndef GALERA_WITH_ASAN
+            ret = wsrep->init(wsrep, &args);
+            FAIL_UNLESS(WSREP_OK == ret);
+
+            struct wsrep_membership* memb = NULL;
+            ret = membership_v1.get_membership(wsrep, malloc, &memb);
+            FAIL_UNLESS(WSREP_OK != ret);
+            FAIL_UNLESS(NULL == memb);
+
+            wsrep->free(wsrep);
+            unlink("grastate.dat");
+            unlink("galera.cache");
+#else
+            (void)args;
+#endif /* GALERA_WITH_ASAN */
+        }
+        (*wms_deinit)();
+    }
+    wsrep_unload(wsrep);
+    return 0;
+}
+
 int main(int argc, char* argv[])
 {
     int no_fork = ((argc > 1) && !strcmp(argv[1], "nofork")) ? 1 : 0;
@@ -67,6 +141,7 @@ int main(int argc, char* argv[])
     }
 
     failed += wsrep_load_unload();
+    failed += wsrep_load_unload_membership_v1();
 
     if (log_file)
     {

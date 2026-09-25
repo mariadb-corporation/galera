@@ -22,6 +22,7 @@ include_directories(
   ${PROJECT_SOURCE_DIR}/gcomm/src
   ${PROJECT_SOURCE_DIR}/gcs/src
   ${PROJECT_SOURCE_DIR}/wsrep/src
+  ${PROJECT_SOURCE_DIR}/wsrep/ps
   )
 
 # Options to control compiler options and error behavior.
@@ -36,6 +37,8 @@ option(GALERA_SOURCE
 
 # Developer options and instrumentation.
 option(GALERA_WITH_ASAN "Enable ASAN instrumentation" OFF)
+option(GALERA_WITH_ASAN_SCOPED "Enable ASAN instrumentation with -fsanitize-address-use-after-scope" OFF)
+option(GALERA_WITH_UBSAN "Enable UBSAN instrumentation" OFF)
 option(GALERA_WITH_VALGRIND "Optionally run tests with valgrind" OFF)
 option(GALERA_WITH_COVERAGE "Compile with coverage instrumentation" OFF)
 option(GALERA_GCS_SM_DEBUG
@@ -59,7 +62,7 @@ option(GALERA_GLIBCXX_DEBUG "Enable glibc++ debug instrumentation" OFF)
 # ``CMAKE_REQUIRED_LIBRARIES`` variable.  This policy provides compatibility
 # with projects that have not been updated to expect this behavior.
 if (POLICY CMP0075)
-  CMAKE_POLICY(SET CMP0075 OLD)
+  CMAKE_POLICY(SET CMP0075 NEW)
 endif()
 
 # Determine version first to have it near the top of build log.
@@ -79,7 +82,7 @@ include(cmake/os.cmake)
 # Instrumentation.
 include(cmake/asan.cmake)
 
-# Common definitions for all modues.
+# Common definitions for all modules.
 include(cmake/common.cmake)
 
 # Libraries, language library features.
@@ -90,6 +93,7 @@ include(cmake/custom_boost.cmake)
 include(cmake/boost.cmake)
 include(cmake/crc32c.cmake)
 include(cmake/endian.cmake)
+include(cmake/seed_seq.cmake)
 include(cmake/shared_ptr.cmake)
 include(cmake/unordered.cmake)
 include(cmake/check.cmake)

@@ -44,7 +44,7 @@ namespace gcache
 
         ~MemStore () { reset(); }
 
-        void* malloc  (size_type size)
+        void* malloc  (size_type const size)
         {
             Limits::assert_size(size);
 
@@ -74,7 +74,7 @@ namespace gcache
 
         void  free (BufferHeader* bh)
         {
-            assert(bh->size > 0);
+            assert(bh->size >= sizeof(BufferHeader));
             assert(bh->size <= size_);
             assert(bh->store == BUFFER_IN_MEM);
             assert(bh->ctx == reinterpret_cast<BH_ctx_t>(this));
@@ -84,14 +84,14 @@ namespace gcache
 
         void  repossess(BufferHeader* bh)
         {
-            assert(bh->size > 0);
+            assert(bh->size >= sizeof(BufferHeader));
             assert(bh->seqno_g != SEQNO_NONE);
             assert(bh->store == BUFFER_IN_MEM);
             assert(bh->ctx == reinterpret_cast<BH_ctx_t>(this));
             assert(BH_is_released(bh)); // will be marked unreleased by caller
         }
 
-        void* realloc (void* ptr, size_type size)
+        void* realloc (void* ptr, size_type const size)
         {
             if (!ptr) return malloc(size);
 
@@ -118,7 +118,7 @@ namespace gcache
                     allocd_.insert(bh);
                 }
 
-                assert (bh->size == old_size);
+                assert (old_size == 0 || bh->size == old_size);
                 bh->size  = size;
 
                 size_ += diff_size;
