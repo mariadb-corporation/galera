@@ -721,6 +721,7 @@ void gcomm::AsioTcpAcceptor::accept_handler(
     if (!error)
     {
         next_socket_->socket_ = accepted_socket;
+        next_socket_->state_ = Socket::S_CONNECTING;
         /* Notify upper layer which then calls accept() to acquire ownership. */
         net_.dispatch(id(), Datagram(), ProtoUpMeta(error.value()));
         assert(not next_socket_);
